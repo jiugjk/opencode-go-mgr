@@ -9,7 +9,9 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
+use ocg_core::models::{
+    Account, AccountUpdate, ForwardLog, FreeModelRouting, ProxyMode, RoutingMode,
+};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -354,10 +356,13 @@ fn build_state_with_routing(
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
     let mut config = state.config();
     // Pin the primary key value for the test requests. The mock upstream is
-    // loopback: never route test traffic through an ambient proxy.
+    // loopback: never route test traffic through an ambient proxy. Free-model
+    // prefer mapping is pinned off so Go-model requests stay on the plain
+    // mock upstream (a bare host is not a derivable Zen free base).
     config.gateway_key = "gw-test".into();
     config.upstream_base_url = base_url;
     config.proxy_mode = ProxyMode::Direct;
+    config.free_model_routing = FreeModelRouting::Explicit;
     config.routing_mode = routing_mode;
     config.conversation_sticky = conversation_sticky;
     state.set_config(config).unwrap();
