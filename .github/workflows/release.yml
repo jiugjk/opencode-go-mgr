@@ -305,6 +305,9 @@ jobs:
               throw 'A tag release smoke requires a current published GitHub Release for the overwrite bootstrap.'
             }
             Write-Host 'No published release is available; using the candidate-only install smoke.'
+            # The pwsh shell wrapper exits with $LASTEXITCODE; gh's "release not
+            # found" exit code would otherwise fail this step after a passing smoke.
+            $global:LASTEXITCODE = 0
           }
 
           $latestVersion = $latestTag -replace '^v', ''
