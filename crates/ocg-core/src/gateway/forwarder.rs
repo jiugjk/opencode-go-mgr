@@ -2267,6 +2267,7 @@ fn success_status_for_cost(cost_state: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pricing_metrics(
     snapshot: &PricingSnapshot,
     model: &str,
