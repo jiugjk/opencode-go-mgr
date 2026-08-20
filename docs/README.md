@@ -46,11 +46,11 @@ When docs disagree, prefer the source below and fix the other side.
 | Agent coding constraints / 助手约束 | [../AGENTS.md](../AGENTS.md) |
 
 Example version in Docker snippets should match the current release line
-(currently **v1.8.0**). Do not leave older patch pins in USER /
+(currently **v1.8.1**). Do not leave older patch pins in USER /
 `.env.example` / `compose.example.yaml` after a version bump. The product
 README no longer pins a clone tag.
 
-Docker 示例里的版本钉应与当前发版线一致（现为 **v1.8.0**）。升版后不要把
+Docker 示例里的版本钉应与当前发版线一致（现为 **v1.8.1**）。升版后不要把
 USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 不再钉 clone tag。
 
