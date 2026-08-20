@@ -425,15 +425,20 @@ repository signing secret 签一个临时 payload，并用已通过连续性检�
 
 `.github/workflows/release.yml` 由 `workflow_dispatch` 和 `v*` tag 触发。
 
-- 手动候选可选 Windows x64、macOS Universal、Linux x64 或全部平台，刻意只生成
-  未签名冒烟产物；即使手动运行选择 tag 作为 ref，也不会获得生产签名权限。
+- 手动候选可选 Windows x64（dispatch 默认值）、macOS Universal、Linux x64 或全部
+  平台，刻意只生成未签名冒烟产物；即使手动运行选择 tag 作为 ref，也不会获得生产
+  签名权限。
 - 只有 `v*` tag 的 `push` 事件才会强制走完整三平台矩阵并注入 repository signing
   secrets。对这个单维护者仓库，推送该 tag 就是明确的公开发布授权。
 - 质量门与无密钥 Ubuntu 预检并行：预检在 `pwsh` 下解析抽出的安装器冒烟脚本、
   运行发布辅助测试并校验所有版本清单。
 
-预检通过后，每个选中的原生 runner 恢复对应 Rust 缓存并安装依赖。工作流只有在
-plan 根据事件确认这是真实 `v*` tag push 时才注入签名 secrets，随后验证公私钥和
+预检通过后，每个选中的原生 runner 恢复对应 Rust 缓存并安装依赖。随后每个构建
+job 都会运行 `cargo run -p ocg-core --example export_pricing_seed`，用与运行时完
+全相同的解析器从 `https://opencode.ai/docs/go/` 刷新内置价格种子
+（`crates/ocg-core/src/pricing-seed.json`）；抓取或解析失败会让构建直接失败，
+已提交的 JSON 是离线构建的兜底。工作流只有在 plan 根据事件确认这是真实 `v*`
+tag push 时才注入签名 secrets，随后验证公私钥和
 已提交公钥指纹，再执行带签名构建；手动 job 得到空签名值，只执行普通未签名构
 建。两条路径都会运行 CLI/GUI 冒烟并上传保留 7 天的 `release-<platform>`。通用
 测试、类型和 lint 不再在三台 runner 上重复执行。

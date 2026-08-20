@@ -1128,8 +1128,8 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /connect_timeout_secs: 30/);
   assert.match(settings, /non_stream_timeout_secs: 900/);
   assert.match(settings, /stream_idle_timeout_secs: 300/);
-  assert.match(settings, /routing_mode: "strict-priority"/);
-  assert.match(settings, /conversation_sticky: false/);
+  assert.match(settings, /routing_mode: "sticky-global"/);
+  assert.match(settings, /conversation_sticky: true/);
   assert.match(settings, /账号路由/);
   assert.match(settings, /n-radio-group[\s\S]*config\.routing_mode/);
   assert.match(settings, /name="routing-mode"/);

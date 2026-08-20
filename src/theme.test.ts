@@ -39,12 +39,12 @@ function mixHex(foreground: string, background: string, foregroundWeight: number
 
 test("readTheme accepts current themes and migrates legacy values", () => {
   for (const { value } of THEME_OPTIONS) assert.equal(readTheme(storage(value)), value);
-  assert.equal(readTheme(storage("system")), "default");
+  assert.equal(readTheme(storage("system")), "black");
   assert.equal(readTheme(storage("light")), "white");
   assert.equal(readTheme(storage("dark")), "black");
-  assert.equal(readTheme(storage("legacy")), "default");
-  assert.equal(readTheme(null), "default");
-  assert.equal(readTheme({ getItem: () => { throw new Error("blocked"); } }), "default");
+  assert.equal(readTheme(storage("legacy")), "black");
+  assert.equal(readTheme(null), "black");
+  assert.equal(readTheme({ getItem: () => { throw new Error("blocked"); } }), "black");
   assert.equal(getThemeStorage(), null);
 
   assert.doesNotThrow(() => writeTheme({ setItem: () => { throw new Error("blocked"); } }, "black"));

@@ -188,12 +188,12 @@ export function readTheme(storage: Pick<Storage, "getItem"> | null): ThemeName {
   try {
     value = storage?.getItem(THEME_STORAGE_KEY);
   } catch {
-    return "default";
+    return "black";
   }
-  if (value === "system") return "default";
+  if (value === "system") return "black";
   if (value === "light") return "white";
   if (value === "dark") return "black";
-  return value && themeNames.has(value as ThemeName) ? value as ThemeName : "default";
+  return value && themeNames.has(value as ThemeName) ? value as ThemeName : "black";
 }
 
 export function getThemeStorage(): Storage | null {

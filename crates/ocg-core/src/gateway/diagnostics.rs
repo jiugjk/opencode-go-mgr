@@ -17,6 +17,7 @@ pub const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 pub struct RequestTrace {
     pub request_id: String,
     started_at: Instant,
+    started_at_utc: chrono::DateTime<chrono::Utc>,
 }
 
 impl RequestTrace {
@@ -24,11 +25,19 @@ impl RequestTrace {
         Self {
             request_id: format!("ocg-{}", Uuid::new_v4()),
             started_at: Instant::now(),
+            started_at_utc: chrono::Utc::now(),
         }
     }
 
     pub fn elapsed_ms(&self) -> u64 {
         self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    /// Wall-clock moment the request entered the gateway. Peak/off-peak tiered
+    /// pricing is decided by this timestamp, not by when the response arrived,
+    /// so a long stream that crosses a UTC boundary keeps one consistent rate.
+    pub fn priced_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.started_at_utc
     }
 }
 

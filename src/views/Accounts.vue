@@ -3,12 +3,36 @@
     <n-space vertical :size="16" class="accounts-content">
       <n-space justify="space-between" align="center" class="accounts-toolbar">
         <n-h3 style="margin: 0">{{ t("账号") }}</n-h3>
-        <n-button type="primary" @click="openAddModal">
-          <template #icon>
-            <n-icon :component="PlusOutlined" />
-          </template>
-          {{ t("新增账号") }}
-        </n-button>
+        <n-space :size="8" align="center">
+          <n-button
+            secondary
+            :loading="testingAll"
+            :disabled="accounts.length === 0 || refreshingAllUsage"
+            @click="testAllAccounts"
+          >
+            <template #icon>
+              <n-icon :component="ThunderboltOutlined" />
+            </template>
+            {{ t("测试所有账号") }}
+          </n-button>
+          <n-button
+            secondary
+            :loading="refreshingAllUsage"
+            :disabled="accounts.length === 0 || testingAll"
+            @click="refreshAllAccountUsage"
+          >
+            <template #icon>
+              <n-icon :component="ReloadOutlined" />
+            </template>
+            {{ t("刷新所有账号") }}
+          </n-button>
+          <n-button type="primary" @click="openAddModal">
+            <template #icon>
+              <n-icon :component="PlusOutlined" />
+            </template>
+            {{ t("新增账号") }}
+          </n-button>
+        </n-space>
       </n-space>
 
       <span id="account-order-instructions" class="sr-only">
@@ -595,6 +619,8 @@ const usageLoading = ref<Record<string, boolean>>({});
 const usageLoadErrors = ref<Record<string, string | null>>({});
 const usageRefreshLoading = ref<Record<string, boolean>>({});
 const pinging = ref<Record<string, boolean>>({});
+const testingAll = ref(false);
+const refreshingAllUsage = ref(false);
 const showModal = ref(false);
 const showAddModal = ref(false);
 const showManagedCreate = ref(false);
@@ -885,6 +911,9 @@ async function refreshAccountUsage(accountId: string): Promise<void> {
       usage_sync_next_allowed_at: result.next_allowed_at,
     });
     message.success(t("额度已从 OpenCode 官方用量刷新"));
+    // The sync may have lifted the auth-failure breaker server-side; reload
+    // the account so the card stops showing 认证失效 when it recovered.
+    await refreshAccountState(accountId).catch(() => undefined);
   } catch (error) {
     if (error instanceof DashboardRequestError && error.status === 429) {
       const nextAllowed = error.nextAllowedAt;
@@ -1629,6 +1658,117 @@ async function toggleAccount(id: string) {
     replaceAccount(updated);
   } catch (e) {
     message.error(t("切换失败: {error}", { error: errorDetail(e) }));
+  }
+}
+
+// Batch toolbar actions. Only ready accounts with a stored key can be pinged
+// or refreshed upstream; pending managed drafts are skipped without a request.
+function batchEligibleAccounts(): Account[] {
+  return accounts.value.filter((account) => accountIsReady(account) && account.key !== "");
+}
+
+async function testAllAccounts(): Promise<void> {
+  if (testingAll.value) return;
+  const targets = batchEligibleAccounts();
+  if (targets.length === 0) {
+    message.info(t("没有可测试的账号"));
+    return;
+  }
+  testingAll.value = true;
+  let succeeded = 0;
+  let failed = 0;
+  try {
+    const results = await mapWithConcurrency(targets, 4, (account) =>
+      tauriApi.testAccount(account.id),
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") succeeded += 1;
+      else failed += 1;
+    }
+    if (succeeded === 0) {
+      message.error(t("测试完成: {count} 个账号全部失败", { count: String(failed) }));
+    } else if (failed > 0) {
+      message.warning(
+        t("测试完成: {succeeded} 个成功, {failed} 个失败", {
+          succeeded: String(succeeded),
+          failed: String(failed),
+        }),
+      );
+    } else {
+      message.success(
+        t("测试完成: {count} 个账号全部连接正常", { count: String(succeeded) }),
+      );
+    }
+  } finally {
+    testingAll.value = false;
+    // Ping results change auth-error / cooldown state; reload once for all.
+    await loadAccounts();
+  }
+}
+
+async function refreshAllAccountUsage(): Promise<void> {
+  if (refreshingAllUsage.value) return;
+  const eligible = batchEligibleAccounts();
+  const targets = eligible.filter((account) => !isUsageRefreshBlocked(account));
+  const blocked = eligible.length - targets.length;
+  if (targets.length === 0) {
+    message.info(
+      blocked > 0
+        ? t("所有账号都在刷新冷却中")
+        : t("没有可刷新的账号"),
+    );
+    return;
+  }
+  refreshingAllUsage.value = true;
+  let succeeded = 0;
+  let failed = 0;
+  try {
+    // Official usage sync is globally serialized server-side (concurrency 1),
+    // so a sequential sweep avoids queueing behind ourselves.
+    for (const account of targets) {
+      if (usageRefreshLoading.value[account.id] || usageLoading.value[account.id]) {
+        continue;
+      }
+      usageRefreshLoading.value = { ...usageRefreshLoading.value, [account.id]: true };
+      try {
+        const result = await tauriApi.refreshAccountUsage(account.id);
+        usageMap.value[account.id] = result.usage;
+        syncUsageEdits(account.id, result.usage);
+        patchAccountUsageSync(account.id, {
+          usage_sync_last_success_at: result.last_success_at,
+          usage_sync_next_allowed_at: result.next_allowed_at,
+        });
+        succeeded += 1;
+      } catch (error) {
+        failed += 1;
+        if (error instanceof DashboardRequestError && error.status === 429) {
+          const nextAllowed = error.nextAllowedAt;
+          if (nextAllowed) {
+            patchAccountUsageSync(account.id, { usage_sync_next_allowed_at: nextAllowed });
+          }
+        }
+      } finally {
+        usageRefreshLoading.value = { ...usageRefreshLoading.value, [account.id]: false };
+      }
+    }
+    if (succeeded === 0) {
+      message.error(t("刷新完成: {count} 个账号全部失败", { count: String(failed) }));
+    } else if (failed > 0 || blocked > 0) {
+      message.warning(
+        t("刷新完成: {succeeded} 个成功, {failed} 个失败, {blocked} 个冷却中", {
+          succeeded: String(succeeded),
+          failed: String(failed),
+          blocked: String(blocked),
+        }),
+      );
+    } else {
+      message.success(t("刷新完成: {count} 个账号全部成功", { count: String(succeeded) }));
+    }
+  } finally {
+    refreshingAllUsage.value = false;
+    // A successful sync can lift the auth-failure breaker server-side;
+    // reload once so the cards reflect any recovered accounts.
+    await loadAccounts();
   }
 }
 

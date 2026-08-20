@@ -4121,6 +4121,9 @@ mod tests {
             let mut config = state.config();
             config.upstream_base_url = format!("http://{address}");
             config.non_stream_timeout_secs = 5;
+            // The mock upstream is loopback-only; never route the verification
+            // ping through a host system proxy, which can answer 502 on its own.
+            config.proxy_mode = ProxyMode::Direct;
             state.set_config(config).unwrap();
 
             let result = verify_managed_account_key(

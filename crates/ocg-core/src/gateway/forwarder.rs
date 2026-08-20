@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::BytesMut;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -1311,6 +1311,7 @@ async fn forward_request_impl(
                                     cached,
                                     cache_creation,
                                     service_tier.as_deref(),
+                                    attempt.trace.priced_at(),
                                 );
                                 let status = success_status_for_cost(metrics.cost_state);
                                 (status.to_string(), metrics)
@@ -1494,6 +1495,7 @@ async fn forward_request_impl(
                 cached_tokens,
                 cache_creation_tokens,
                 plan.service_tier.as_deref(),
+                attempt_context.trace.priced_at(),
             )
         } else {
             metadata_metrics(
@@ -1697,6 +1699,7 @@ impl Drop for StreamOutcomeGuard {
                     cached,
                     cache_creation,
                     self.service_tier.as_deref(),
+                    self.attempt_context.trace.priced_at(),
                 );
                 (
                     success_status_for_cost(metrics.cost_state),
@@ -2272,14 +2275,16 @@ fn pricing_metrics(
     cached_tokens: i64,
     cache_creation_tokens: i64,
     service_tier: Option<&str>,
+    priced_at: DateTime<Utc>,
 ) -> ForwardMetrics {
-    let estimate = snapshot.estimate(
+    let estimate = snapshot.estimate_at(
         model,
         prompt_tokens,
         completion_tokens,
         cached_tokens,
         cache_creation_tokens,
         service_tier,
+        priced_at,
     );
     ForwardMetrics {
         prompt_tokens,
@@ -2469,6 +2474,43 @@ mod stream_usage_tests {
 
     fn usage_event() -> Vec<u8> {
         b"data: {\"id\":\"x\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\ndata: [DONE]\n\n".to_vec()
+    }
+
+    #[test]
+    fn pricing_metrics_decides_the_peak_tier_at_request_start() {
+        // Peak/off-peak tiered models must be priced by when the request
+        // entered the gateway, not by when the (possibly long) response
+        // arrived, so one request never mixes or mispicks a UTC boundary.
+        let snapshot = crate::pricing::embedded_seed();
+        let peak_start = DateTime::parse_from_rfc3339("2026-08-16T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let off_peak_start = DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let peak = pricing_metrics(
+            &snapshot,
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            None,
+            peak_start,
+        );
+        let off_peak = pricing_metrics(
+            &snapshot,
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            None,
+            off_peak_start,
+        );
+        assert_eq!(peak.cost_state, "priced");
+        assert!((peak.cost - 0.88).abs() < 1e-12);
+        assert!((off_peak.cost - 0.44).abs() < 1e-12);
     }
 
     #[test]

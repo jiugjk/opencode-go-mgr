@@ -2338,6 +2338,22 @@ impl Database {
 
         record_account_usage_sync_success_on(&tx, account_id, metadata)?;
         let usage = account_usage_with_limits_on(&tx, account_id, limits, metadata.now)?;
+        // Auto-recovery from the auth-failure breaker: this commit only runs
+        // after the official usage endpoint answered 2xx with this exact key,
+        // so the key itself works. Lift the 401 breaker only when all three
+        // Go windows still have headroom; with any window exhausted the
+        // account stays benched so rotation does not immediately trip 429s.
+        if usage.window_5h < limits.window_5h
+            && usage.window_week < limits.window_week
+            && usage.window_month < limits.window_month
+        {
+            tx.execute(
+                "UPDATE accounts
+                 SET auth_error = NULL, updated_at = ?2
+                 WHERE id = ?1 AND auth_error IS NOT NULL",
+                params![account_id, metadata.now.to_rfc3339()],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(usage))
     }
@@ -5148,6 +5164,101 @@ mod tests {
         assert_eq!(sync_after.next_eligible_at, sync_before.next_eligible_at);
         assert_eq!(sync_after.failure_streak, sync_before.failure_streak);
         assert_eq!(sync_after.last_expedited_at, sync_before.last_expedited_at);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn official_usage_sync_success_lifts_the_auth_breaker_only_with_full_headroom() {
+        let dir = temp_data_dir("sync-lifts-auth-breaker");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut acct = account("auth-lift");
+        acct.purchase_date = "2026-07-01".into();
+        db.create_account(&acct).expect("account should be created");
+        db.set_account_auth_error_if_key_matches(
+            "auth-lift",
+            "cipher",
+            Some("upstream auth error 401"),
+        )
+        .expect("auth breaker should be set");
+
+        let limits = snapshot_limits();
+        let now = Utc::now();
+        let metadata = |offset_secs: i64| AccountUsageSyncSuccessMetadata {
+            now: now + Duration::seconds(offset_secs),
+            next_eligible_at: now + Duration::hours(1),
+            mark_expedited: false,
+        };
+
+        // Any single exhausted window keeps the breaker benched.
+        for (rolling, weekly, monthly) in [
+            (100.0, 40.0, 10.0),
+            (50.0, 100.0, 10.0),
+            (50.0, 40.0, 100.0),
+        ] {
+            db.commit_official_usage_sync_success(
+                "auth-lift",
+                "cipher",
+                &usage_calibration(rolling, weekly, monthly, 180, 1_440),
+                &limits,
+                metadata(0),
+            )
+            .expect("sync with an exhausted window should still commit");
+            assert!(
+                db.get_account("auth-lift")
+                    .expect("account should load")
+                    .expect("account should exist")
+                    .auth_error
+                    .is_some(),
+                "an exhausted window (rolling={rolling}, weekly={weekly}, monthly={monthly}) must keep the auth breaker"
+            );
+        }
+
+        // All three windows below their limits lift the breaker.
+        db.commit_official_usage_sync_success(
+            "auth-lift",
+            "cipher",
+            &usage_calibration(50.0, 40.0, 10.0, 180, 1_440),
+            &limits,
+            metadata(60),
+        )
+        .expect("sync with headroom should commit");
+        assert!(
+            db.get_account("auth-lift")
+                .expect("account should load")
+                .expect("account should exist")
+                .auth_error
+                .is_none(),
+            "a successful official sync with full window headroom must lift the auth breaker"
+        );
+
+        // A stale key never clears (or sets) breaker state: the CAS miss returns None.
+        db.set_account_auth_error_if_key_matches(
+            "auth-lift",
+            "cipher",
+            Some("upstream auth error 401"),
+        )
+        .expect("auth breaker should be set again");
+        let stale = db.commit_official_usage_sync_success(
+            "auth-lift",
+            "wrong-cipher",
+            &usage_calibration(50.0, 40.0, 10.0, 180, 1_440),
+            &limits,
+            metadata(120),
+        );
+        assert!(
+            matches!(stale, Ok(None)),
+            "a key CAS miss must return None without touching the account"
+        );
+        assert!(
+            db.get_account("auth-lift")
+                .expect("account should load")
+                .expect("account should exist")
+                .auth_error
+                .is_some(),
+            "a key CAS miss must leave the auth breaker untouched"
+        );
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");

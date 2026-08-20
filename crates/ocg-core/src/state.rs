@@ -933,7 +933,7 @@ mod tests {
         );
 
         let mut next = state.config();
-        next.conversation_sticky = true;
+        next.conversation_sticky = false;
         state
             .set_config(next)
             .expect("conversation sticky change should reset routing");
@@ -1285,9 +1285,9 @@ mod tests {
         assert!(state.config().show_dock_icon);
         assert_eq!(
             state.config().routing_mode,
-            crate::models::RoutingMode::StrictPriority
+            crate::models::RoutingMode::StickyGlobal
         );
-        assert!(!state.config().conversation_sticky);
+        assert!(state.config().conversation_sticky);
         assert_eq!(state.config().proxy_mode, ProxyMode::Auto);
         assert!(state.config().proxy_url.is_empty());
         let stored = state

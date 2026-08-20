@@ -6,7 +6,7 @@ on:
       target:
         description: Platform candidate to build; production tag pushes always build every platform
         required: true
-        default: all
+        default: windows-x64
         type: choice
         options:
           - all
@@ -162,6 +162,9 @@ jobs:
           save-if: "true"
 
       - run: pnpm install --frozen-lockfile
+
+      - name: Refresh embedded pricing seed from the official Go page
+        run: cargo run -p ocg-core --example export_pricing_seed
 
       - name: Validate production signing pair and public-key continuity
         if: needs.plan.outputs.production == 'true'

@@ -322,10 +322,10 @@ fn format_date(date: NaiveDate) -> String {
 pub enum FreeModelRouting {
     /// Reject free model ids; never map Go requests onto free twins.
     Deny,
-    /// Only explicit free model ids use the Zen free channel (default).
-    #[default]
+    /// Only explicit free model ids use the Zen free channel.
     Explicit,
-    /// Prefer mapped free twins when context fits; fall back to Go.
+    /// Prefer mapped free twins when context fits; fall back to Go (default).
+    #[default]
     Prefer,
 }
 
@@ -339,8 +339,8 @@ pub enum UpstreamChannel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RoutingMode {
-    #[default]
     StrictPriority,
+    #[default]
     StickyGlobal,
     RoundRobin,
 }
@@ -357,7 +357,7 @@ pub enum ProxyMode {
     Direct,
 }
 
-pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6NP8V";
+pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=55G3ETNT1Q";
 
 /// Shared rejection message for a blank primary gateway key; used by
 /// `AppConfig::validate` and both settings-update entry points.
@@ -404,9 +404,9 @@ impl Default for AppConfig {
             connect_timeout_secs: 30,
             non_stream_timeout_secs: 900,
             stream_idle_timeout_secs: 300,
-            routing_mode: RoutingMode::StrictPriority,
-            conversation_sticky: false,
-            free_model_routing: FreeModelRouting::Explicit,
+            routing_mode: RoutingMode::StickyGlobal,
+            conversation_sticky: true,
+            free_model_routing: FreeModelRouting::Prefer,
             claude_desktop_models: ClaudeDesktopModels::default(),
         }
     }
@@ -982,9 +982,9 @@ mod tests {
             "gateway_key": "k"
         }))
         .expect("missing routing fields should default");
-        assert_eq!(missing.routing_mode, RoutingMode::StrictPriority);
-        assert!(!missing.conversation_sticky);
-        assert_eq!(missing.free_model_routing, FreeModelRouting::Explicit);
+        assert_eq!(missing.routing_mode, RoutingMode::StickyGlobal);
+        assert!(missing.conversation_sticky);
+        assert_eq!(missing.free_model_routing, FreeModelRouting::Prefer);
         assert_eq!(missing.proxy_mode, ProxyMode::Auto);
         assert!(missing.proxy_url.is_empty());
 

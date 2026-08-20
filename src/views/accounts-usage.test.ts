@@ -234,6 +234,25 @@ test("accounts page surfaces official sync last-success and retry state beyond b
   assert.match(source, /:disabled="isUsageRefreshBlocked\(account\)/);
 });
 
+test("accounts page offers batch test and batch usage refresh for eligible accounts", async () => {
+  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  // Both batch actions live in the toolbar and disable each other while one runs.
+  assert.match(source, /@click="testAllAccounts"/);
+  assert.match(source, /@click="refreshAllAccountUsage"/);
+  assert.match(source, /:disabled="accounts\.length === 0 \|\| refreshingAllUsage"/);
+  assert.match(source, /:disabled="accounts\.length === 0 \|\| testingAll"/);
+  // Only ready accounts with a stored key join a batch sweep.
+  assert.match(source, /function batchEligibleAccounts/);
+  assert.match(source, /accountIsReady\(account\) && account\.key !== ""/);
+  // Pings fan out with bounded concurrency and reload the list once at the end;
+  // usage refresh stays sequential because the server serializes it globally.
+  assert.match(source, /await mapWithConcurrency\(targets, 4, \(account\) =>\s*\n\s*tauriApi\.testAccount\(account\.id\),\s*\n\s*\)/);
+  assert.match(source, /for \(const account of targets\) \{/);
+  assert.match(source, /tauriApi\.refreshAccountUsage\(account\.id\)/);
+  assert.match(source, /测试所有账号/);
+  assert.match(source, /刷新所有账号/);
+});
+
 test("usage refresh preserves dirty drafts unless a real 429 reset that window", () => {
   const dirty: UsageEditState = {
     draft: 75,

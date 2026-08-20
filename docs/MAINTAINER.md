@@ -506,9 +506,10 @@ write the Rust cache so a follow-up fix can reuse the compile.
 
 `.github/workflows/release.yml` runs on `workflow_dispatch` and on `v*` tags.
 
-- A manual candidate can select Windows x64, macOS Universal, Linux x64, or
-  all three platforms and intentionally produces unsigned smoke artifacts,
-  even when a manual dispatch selects a tag as its ref.
+- A manual candidate can select Windows x64 (the dispatch default), macOS
+  Universal, Linux x64, or all three platforms and intentionally produces
+  unsigned smoke artifacts, even when a manual dispatch selects a tag as its
+  ref.
 - Only a `push` event for a `v*` tag forces the complete three-platform
   matrix and supplies the repository signing secrets. For this
   single-maintainer repository, pushing that tag is the explicit publication
@@ -518,7 +519,12 @@ write the Rust cache so a follow-up fix can reuse the compile.
   release-helper tests, and validates all version manifests.
 
 After preflight, each selected native runner restores its platform Rust cache
-and installs dependencies. The workflow injects signing secrets only when its
+and installs dependencies. Every build job then runs
+`cargo run -p ocg-core --example export_pricing_seed`, which refreshes the
+embedded pricing seed (`crates/ocg-core/src/pricing-seed.json`) from
+`https://opencode.ai/docs/go/` with the exact runtime parser; a fetch or
+parse failure fails the build closed, and the committed JSON remains the
+offline fallback. The workflow injects signing secrets only when its
 plan proves the event is an actual `v*` tag push, then proves the signing pair
 and committed public-key fingerprint before running the signed build. Manual
 jobs receive empty signing values and run the ordinary unsigned build. Both

@@ -539,9 +539,9 @@ const config = ref<AppConfig>({
   connect_timeout_secs: 30,
   non_stream_timeout_secs: 900,
   stream_idle_timeout_secs: 300,
-  routing_mode: "strict-priority",
-  conversation_sticky: false,
-  free_model_routing: "explicit",
+  routing_mode: "sticky-global",
+  conversation_sticky: true,
+  free_model_routing: "prefer",
 });
 
 const freeModelRoutingOptions: Array<{

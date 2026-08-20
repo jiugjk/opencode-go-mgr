@@ -217,206 +217,16 @@ impl PricingSnapshot {
 }
 
 pub fn embedded_seed() -> PricingSnapshot {
-    let mut models = vec![
-        seed_model("grok-4.5", "Grok 4.5", 2.0, 6.0, 0.3, None, 15.0),
-        seed_model("glm-5.3", "GLM-5.3", 1.4, 4.4, 0.26, None, 15.0),
-        seed_model("glm-5.2", "GLM-5.2", 1.4, 4.4, 0.26, None, 60.0),
-        seed_model("glm-5.1", "GLM-5.1", 1.4, 4.4, 0.26, None, 60.0),
-        seed_tier_with_usage(
-            "gpt-5.6-luna",
-            "GPT 5.6 Luna (≤ 272K tokens)",
-            0.2,
-            1.2,
-            0.02,
-            Some(0.25),
-            15.0,
-            None,
-            Some(272_000),
-        ),
-        seed_tier_with_usage(
-            "gpt-5.6-luna",
-            "GPT 5.6 Luna (> 272K tokens)",
-            0.4,
-            1.8,
-            0.04,
-            Some(0.5),
-            15.0,
-            Some(272_001),
-            None,
-        ),
-        seed_model("kimi-k3", "Kimi K3", 3.0, 15.0, 0.3, None, 15.0),
-        seed_model(
-            "kimi-k2.7-code",
-            "Kimi K2.7 Code",
-            0.95,
-            4.0,
-            0.19,
-            None,
-            60.0,
-        ),
-        seed_model("kimi-k2.6", "Kimi K2.6", 0.95, 4.0, 0.16, None, 60.0),
-        seed_model("mimo-v2.5", "MiMo V2.5", 0.14, 0.28, 0.0028, None, 60.0),
-        seed_model(
-            "mimo-v2.5-pro",
-            "MiMo V2.5 Pro",
-            0.435,
-            0.87,
-            0.003625,
-            None,
-            15.0,
-        ),
-        seed_model("minimax-m3", "MiniMax M3", 0.3, 1.2, 0.06, None, 60.0),
-        seed_model(
-            "minimax-m2.7",
-            "MiniMax M2.7",
-            0.3,
-            1.2,
-            0.06,
-            Some(0.375),
-            60.0,
-        ),
-        seed_model(
-            "minimax-m2.5",
-            "MiniMax M2.5",
-            0.3,
-            1.2,
-            0.06,
-            Some(0.375),
-            60.0,
-        ),
-        seed_model(
-            "qwen3.8-max",
-            "Qwen3.8 Max",
-            2.0,
-            6.0,
-            0.25,
-            Some(2.5),
-            15.0,
-        ),
-        seed_model(
-            "qwen3.7-max",
-            "Qwen3.7 Max",
-            2.5,
-            7.5,
-            0.5,
-            Some(3.125),
-            60.0,
-        ),
-        seed_tier(
-            "qwen3.7-plus",
-            "Qwen3.7 Plus (≤ 256K tokens)",
-            0.4,
-            1.6,
-            0.04,
-            0.5,
-            None,
-            Some(256_000),
-        ),
-        seed_tier(
-            "qwen3.7-plus",
-            "Qwen3.7 Plus (> 256K tokens)",
-            1.2,
-            4.8,
-            0.12,
-            1.5,
-            Some(256_001),
-            None,
-        ),
-        seed_tier(
-            "qwen3.6-plus",
-            "Qwen3.6 Plus (≤ 256K tokens)",
-            0.5,
-            3.0,
-            0.05,
-            0.625,
-            None,
-            Some(256_000),
-        ),
-        seed_tier(
-            "qwen3.6-plus",
-            "Qwen3.6 Plus (> 256K tokens)",
-            2.0,
-            6.0,
-            0.2,
-            2.5,
-            Some(256_001),
-            None,
-        ),
-        seed_scheduled(
-            "deepseek-v4-pro",
-            "DeepSeek V4 Pro (Off-Peak)",
-            0.66,
-            1.98,
-            0.022,
-            None,
-            15.0,
-            PricingTimeWindow::OffPeak,
-        ),
-        seed_scheduled(
-            "deepseek-v4-pro",
-            "DeepSeek V4 Pro (Peak)",
-            1.32,
-            3.96,
-            0.044,
-            None,
-            15.0,
-            PricingTimeWindow::Peak,
-        ),
-        seed_scheduled(
-            "deepseek-v4-flash",
-            "DeepSeek V4 Flash (Off-Peak)",
-            0.22,
-            0.66,
-            0.007,
-            None,
-            15.0,
-            PricingTimeWindow::OffPeak,
-        ),
-        seed_scheduled(
-            "deepseek-v4-flash",
-            "DeepSeek V4 Flash (Peak)",
-            0.44,
-            1.32,
-            0.014,
-            None,
-            15.0,
-            PricingTimeWindow::Peak,
-        ),
-        seed_model(
-            "muse-spark-1.2",
-            "Muse Spark 1.2",
-            0.10,
-            0.20,
-            0.002,
-            None,
-            60.0,
-        ),
-        seed_model(
-            "muse-spark-1.2-contributor",
-            "Muse Spark 1.2 Contributor",
-            0.10,
-            0.20,
-            0.002,
-            None,
-            60.0,
-        ),
-        seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
-    ];
-    apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
-    sort_models(&mut models);
+    // The seed snapshot is exported from the official Go pricing page by
+    // `cargo run -p ocg-core --example export_pricing_seed` (release.yml
+    // refreshes it on every build) and compiled in via include_str!.
+    let snapshot: PricingSnapshot = serde_json::from_str(include_str!("pricing-seed.json"))
+        .expect("the embedded pricing seed must deserialize");
+    let snapshot = ensure_current_adjustment_policy(snapshot);
+    let snapshot = ensure_seed_model_coverage(snapshot);
     PricingSnapshot {
-        revision: format!("seed-2026-08-16-{ADJUSTMENT_POLICY_VERSION}"),
         activated_at: Utc::now().to_rfc3339(),
-        document_updated_at: "2026-08-16T00:00:00.000Z".to_string(),
-        source_url: SOURCE_URL.to_string(),
-        content_hash: "embedded-opencode-go-2026-08-16".to_string(),
-        limits: PricingLimits {
-            window_5h: 12.0,
-            window_week: 30.0,
-            window_month: MONTHLY_LIMIT,
-        },
-        models,
-        adjustment_policy_version: ADJUSTMENT_POLICY_VERSION.to_string(),
+        ..snapshot
     }
 }
 
@@ -445,7 +255,28 @@ pub(crate) fn ensure_current_adjustment_policy(mut snapshot: PricingSnapshot) ->
 // standard Muse; standard rates come from live Go measurements, not that table.
 // Do not turn this into "every embedded seed row": an official removal must
 // not silently revive unrelated models forever.
-const SEED_COVERAGE_MODEL_IDS: &[&str] = &["muse-spark-1.2", "muse-spark-1.2-contributor"];
+fn seed_muse_models() -> Vec<PricingModel> {
+    vec![
+        seed_model(
+            "muse-spark-1.2",
+            "Muse Spark 1.2",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+        seed_model(
+            "muse-spark-1.2-contributor",
+            "Muse Spark 1.2 Contributor",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+    ]
+}
 
 /// Append the explicitly allowlisted Muse rows that an existing snapshot does
 /// not know about yet. Entries already present — official rows or user-edited
@@ -456,13 +287,9 @@ pub(crate) fn ensure_seed_model_coverage(mut snapshot: PricingSnapshot) -> Prici
         .iter()
         .map(|model| model.model_id.as_str())
         .collect::<HashSet<_>>();
-    let mut missing: Vec<PricingModel> = embedded_seed()
-        .models
+    let mut missing: Vec<PricingModel> = seed_muse_models()
         .into_iter()
-        .filter(|model| {
-            SEED_COVERAGE_MODEL_IDS.contains(&model.model_id.as_str())
-                && !known.contains(model.model_id.as_str())
-        })
+        .filter(|model| !known.contains(model.model_id.as_str()))
         .collect();
     if missing.is_empty() {
         return snapshot;
@@ -513,64 +340,6 @@ fn seed_model(
         time_window: PricingTimeWindow::Always,
         adjustments: Vec::new(),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn seed_scheduled(
-    id: &str,
-    name: &str,
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: Option<f64>,
-    usage: f64,
-    time_window: PricingTimeWindow,
-) -> PricingModel {
-    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
-    model.time_window = time_window;
-    model
-}
-
-#[allow(clippy::too_many_arguments)]
-fn seed_tier(
-    id: &str,
-    name: &str,
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: f64,
-    min_input_tokens: Option<i64>,
-    max_input_tokens: Option<i64>,
-) -> PricingModel {
-    seed_tier_with_usage(
-        id,
-        name,
-        input,
-        output,
-        cache_read,
-        Some(cache_write),
-        60.0,
-        min_input_tokens,
-        max_input_tokens,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn seed_tier_with_usage(
-    id: &str,
-    name: &str,
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: Option<f64>,
-    usage: f64,
-    min_input_tokens: Option<i64>,
-    max_input_tokens: Option<i64>,
-) -> PricingModel {
-    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
-    model.min_input_tokens = min_input_tokens;
-    model.max_input_tokens = max_input_tokens;
-    model
 }
 
 pub async fn fetch_official_snapshot(config: &crate::models::AppConfig) -> Result<PricingSnapshot> {
@@ -1459,12 +1228,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.model_id == "kimi-k3" && entry.quota_multiplier == 4.0)
         );
-        for model_id in [
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "mimo-v2.5-pro",
-            "gpt-5.6-luna",
-        ] {
+        for model_id in ["deepseek-v4-pro", "mimo-v2.5-pro", "gpt-5.6-luna"] {
             let model = snapshot
                 .models
                 .iter()
@@ -1472,6 +1236,13 @@ mod tests {
                 .unwrap();
             assert_eq!(model.quota_multiplier, 4.0);
         }
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .any(|entry| entry.model_id == "deepseek-v4-flash"
+                    && entry.quota_multiplier == 2.0)
+        );
         assert_eq!(
             snapshot
                 .models
@@ -1511,14 +1282,14 @@ mod tests {
             .estimate_at("deepseek-v4-flash", 1_000_000, 0, 0, 0, None, peak)
             .cost
             .unwrap();
-        assert!((off - 0.88).abs() < 1e-12);
-        assert!((on - 1.76).abs() < 1e-12);
+        assert!((off - 0.44).abs() < 1e-12);
+        assert!((on - 0.88).abs() < 1e-12);
     }
 
     #[test]
     fn rejects_incomplete_peak_off_peak_pair() {
         let fixture = include_str!("../tests/fixtures/opencode-go.html").replace(
-            "<tr><td>DeepSeek V4 Flash (Peak)</td><td>$0.44</td><td>$1.32</td><td>$0.014</td><td>-</td><td>$15</td></tr>",
+            "<tr><td>DeepSeek V4 Flash (Peak)</td><td>$0.44</td><td>$1.32</td><td>$0.014</td><td>-</td><td>$30</td></tr>",
             "",
         );
         assert!(

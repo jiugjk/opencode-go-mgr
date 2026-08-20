@@ -577,6 +577,11 @@ Each completed account card shows the account name, cooldown state, and the
   this same SQLite-backed order.
 - **Cooldown reset.** You can reset a cooldown manually from this view. The
   bar snaps back to its local estimate as soon as the cooldown is cleared.
+- **Batch actions.** **Test all accounts** pings every completed account with
+  a stored key (bounded concurrency, one state reload at the end), and
+  **Refresh all accounts** refreshes quotas from official usage one account
+  at a time; accounts still inside the 60-second refresh throttle are
+  skipped and counted in the summary.
 
 ### Pricing
 
@@ -586,6 +591,8 @@ Combinable prices use the standard tier as the complete root row. Expanding it
 shows higher-context Qwen tiers, DeepSeek Peak hours, and MiniMax long-context,
 high-speed, priority, or combined upgrade tiers. DeepSeek V4 Pro and Flash use
 Off-Peak rates except 01:00–04:00 and 06:00–10:00 UTC, when Peak rates apply.
+The Peak / Off-Peak tier is decided by when the request entered the gateway, so
+a long stream that crosses a UTC boundary keeps one consistent rate.
 
 The official multiplier defaults to `monthly limit / Usage`, but can be edited
 for temporary promotions. Saving creates a persistent revision used by later
@@ -1303,7 +1310,12 @@ and browser profiles.
   single-instance lock.
 - **`401 Unauthorized` from the upstream.** The OpenCode-Go account key is
   invalid or revoked. Open the **Accounts** view, replace the key, and try
-  again. `key ping <id>` is the fastest way to confirm.
+  again. `key ping <id>` is the fastest way to confirm. The account is marked
+  as an authentication failure and leaves rotation; that breaker lifts
+  automatically once an official usage sync succeeds with headroom left in
+  all three windows — 5-hour, weekly, and monthly (any exhausted window keeps
+  it benched). Manual **Refresh quota** and **Refresh all accounts** use the
+  same path.
 - **Local bar at 100% but requests still succeed.** That is a *false* circuit
   breaker — local accounting only. Continue using the account; the gateway
   will keep forwarding.
