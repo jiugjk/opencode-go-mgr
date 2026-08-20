@@ -1,6 +1,10 @@
 # Keep git hooks executable and LF-only on all platforms.
 .githooks/** text eol=lf
 
+# Shell scripts must stay LF-only: container-publish tests assert exact line
+# endings, and bash on Linux refuses CRLF shebangs.
+*.sh text eol=lf
+
 # Tauri / Cargo tooling rewrites these with CRLF on Windows; force LF so
 # `git status` stays clean under core.autocrlf=true.
 *.toml text eol=lf
