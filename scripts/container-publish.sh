@@ -72,6 +72,105 @@ arch_digests_for() {
   fi
 }
 
+expected_arch_digests_for() {
+  local image=$1
+  if [[ "$image" == "$BROWSER_IMAGE" ]]; then
+    printf '%s %s' "$BROWSER_PLATFORM_AMD64" "$BROWSER_PLATFORM_ARM64"
+  else
+    printf '%s %s' "$MAIN_PLATFORM_AMD64" "$MAIN_PLATFORM_ARM64"
+  fi
+}
+
+resolve_source_platform_digest() {
+  local image=$1
+  local outer_digest=$2
+  local architecture=$3
+  local ref="$image@$outer_digest"
+  local actual_architecture
+  local actual_os
+  local image_config
+  local leaf_digest
+  local match_count
+  local media_type
+  local raw
+  local error_file="$RUNNER_TEMP/imagetools-source-$architecture-error"
+
+  if ! raw=$(docker buildx imagetools inspect "$ref" --raw 2>"$error_file"); then
+    cat "$error_file" >&2
+    return 1
+  fi
+  if ! media_type=$(jq -er '.mediaType' <<<"$raw"); then
+    echo "Source $ref has no readable media type." >&2
+    return 1
+  fi
+
+  case "$media_type" in
+    application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+      if ! match_count=$(jq -er --arg architecture "$architecture" \
+        '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture)] | length' \
+        <<<"$raw"); then
+        echo "Could not inspect the linux/$architecture children in source index $ref." >&2
+        return 1
+      fi
+      if [[ "$match_count" != 1 ]]; then
+        echo "Source index $ref must contain exactly one linux/$architecture image manifest; found $match_count." >&2
+        return 1
+      fi
+      if ! leaf_digest=$(jq -er --arg architecture "$architecture" \
+        '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture)][0].digest' \
+        <<<"$raw"); then
+        echo "Could not read the linux/$architecture image digest from source index $ref." >&2
+        return 1
+      fi
+      ;;
+    application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+      if ! image_config=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' 2>"$error_file"); then
+        cat "$error_file" >&2
+        return 1
+      fi
+      if ! actual_os=$(jq -er '.os' <<<"$image_config") \
+        || ! actual_architecture=$(jq -er '.architecture' <<<"$image_config"); then
+        echo "Direct image manifest $ref has no readable platform configuration." >&2
+        return 1
+      fi
+      if [[ "$actual_os" != linux || "$actual_architecture" != "$architecture" ]]; then
+        echo "Direct image manifest $ref is $actual_os/$actual_architecture, expected linux/$architecture." >&2
+        return 1
+      fi
+      leaf_digest=$outer_digest
+      ;;
+    *)
+      echo "Source $ref has unsupported media type '$media_type'." >&2
+      return 1
+      ;;
+  esac
+
+  if [[ ! "$leaf_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Source $ref resolved an invalid linux/$architecture digest: ${leaf_digest:-<empty>}." >&2
+    return 1
+  fi
+  printf '%s' "$leaf_digest"
+}
+
+resolve_source_platform_digests() {
+  if ! BROWSER_PLATFORM_AMD64=$(resolve_source_platform_digest \
+    "$BROWSER_IMAGE" "$BROWSER_DIGEST_AMD64" amd64); then
+    return 1
+  fi
+  if ! BROWSER_PLATFORM_ARM64=$(resolve_source_platform_digest \
+    "$BROWSER_IMAGE" "$BROWSER_DIGEST_ARM64" arm64); then
+    return 1
+  fi
+  if ! MAIN_PLATFORM_AMD64=$(resolve_source_platform_digest \
+    "$MAIN_IMAGE" "$MAIN_DIGEST_AMD64" amd64); then
+    return 1
+  fi
+  if ! MAIN_PLATFORM_ARM64=$(resolve_source_platform_digest \
+    "$MAIN_IMAGE" "$MAIN_DIGEST_ARM64" arm64); then
+    return 1
+  fi
+}
+
 manifest_digest() {
   local manifest=$1
   local checksum
@@ -98,7 +197,7 @@ verify_index_json() {
   local expected_manifests
   local media_type
   local revision
-  read -r amd64_digest arm64_digest <<<"$(arch_digests_for "$image")"
+  read -r amd64_digest arm64_digest <<<"$(expected_arch_digests_for "$image")"
   jq -e . >/dev/null <<<"$raw"
   arch_manifests=$(jq -r '[.manifests[]? | select(.platform.os == "linux") | .digest] | sort | join(",")' <<<"$raw")
   expected_manifests=$(printf '%s\n%s\n' "$amd64_digest" "$arm64_digest" | LC_ALL=C sort | paste -sd, -)
@@ -201,6 +300,12 @@ publish_immutable_phase() {
     fi
   done
 
+  # BuildKit provenance makes a single-architecture output an outer OCI index
+  # containing one platform image plus unknown-platform attestation manifests.
+  # Keep the outer digests as create sources, but verify the combined index
+  # against each source's unique platform image leaf.
+  resolve_source_platform_digests
+
   local browser_manifest
   local main_manifest
   local browser_digest
@@ -272,6 +377,7 @@ advance_moving_phase() {
     return
   fi
   require_env MINOR_CHANNEL
+  resolve_source_platform_digests
 
   # This is a fresh post-attestation read. Moving-channel decisions never reuse
   # registry state captured before immutable publication or public verification.

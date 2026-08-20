@@ -15,10 +15,14 @@ const bashPath = process.platform === "win32"
 const digests = {
   browser: `sha256:${"b".repeat(64)}`,
   browserAmd64: `sha256:${"c".repeat(64)}`,
+  browserAmd64Leaf: `sha256:${"1".repeat(64)}`,
   browserArm64: `sha256:${"d".repeat(64)}`,
+  browserArm64Leaf: `sha256:${"2".repeat(64)}`,
   main: `sha256:${"a".repeat(64)}`,
   mainAmd64: `sha256:${"e".repeat(64)}`,
+  mainAmd64Leaf: `sha256:${"3".repeat(64)}`,
   mainArm64: `sha256:${"f".repeat(64)}`,
+  mainArm64Leaf: `sha256:${"4".repeat(64)}`,
 };
 
 function toBashPath(path) {
@@ -43,16 +47,59 @@ raw_for_image() {
   local arm64_digest
   local test_image
   if [[ "$image" == "$BROWSER_IMAGE" ]]; then
-    amd64_digest=$BROWSER_DIGEST_AMD64
-    arm64_digest=$BROWSER_DIGEST_ARM64
+    if [[ "\${SOURCE_MODE:-nested}" == direct* ]]; then
+      amd64_digest=$BROWSER_DIGEST_AMD64
+      arm64_digest=$BROWSER_DIGEST_ARM64
+    else
+      amd64_digest=$BROWSER_PLATFORM_AMD64
+      arm64_digest=$BROWSER_PLATFORM_ARM64
+    fi
     test_image=browser
   else
-    amd64_digest=$MAIN_DIGEST_AMD64
-    arm64_digest=$MAIN_DIGEST_ARM64
+    if [[ "\${SOURCE_MODE:-nested}" == direct* ]]; then
+      amd64_digest=$MAIN_DIGEST_AMD64
+      arm64_digest=$MAIN_DIGEST_ARM64
+    else
+      amd64_digest=$MAIN_PLATFORM_AMD64
+      arm64_digest=$MAIN_PLATFORM_ARM64
+    fi
     test_image=main
   fi
   printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s","platform":{"os":"linux","architecture":"amd64"}},{"digest":"%s","platform":{"os":"linux","architecture":"arm64"}}],"annotations":{"org.opencontainers.image.version":"%s","org.opencontainers.image.revision":"%s"},"testImage":"%s"}' \
     "$amd64_digest" "$arm64_digest" "$CANDIDATE_VERSION" "$FULL_SHA" "$test_image"
+}
+
+source_raw_for() {
+  local image=$1
+  local architecture=$2
+  local leaf_digest
+  local source_mode="\${SOURCE_MODE:-nested}"
+  local output_architecture=$architecture
+  if [[ "$image" == "$BROWSER_IMAGE" && "$architecture" == amd64 ]]; then
+    leaf_digest=$BROWSER_PLATFORM_AMD64
+  elif [[ "$image" == "$BROWSER_IMAGE" ]]; then
+    leaf_digest=$BROWSER_PLATFORM_ARM64
+  elif [[ "$architecture" == amd64 ]]; then
+    leaf_digest=$MAIN_PLATFORM_AMD64
+  else
+    leaf_digest=$MAIN_PLATFORM_ARM64
+  fi
+  if [[ "$source_mode" == direct* ]]; then
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","sourceMode":"direct","testImage":"%s","testArch":"%s"}' "$image" "$architecture"
+    return
+  fi
+  if [[ "$source_mode" == wrong ]]; then
+    if [[ "$architecture" == amd64 ]]; then output_architecture=arm64; else output_architecture=amd64; fi
+  fi
+  if [[ "$source_mode" == missing ]]; then
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"sha256:%064d","platform":{"os":"unknown","architecture":"unknown"}}],"sourceMode":"missing","testImage":"%s","testArch":"%s"}' 0 "$image" "$architecture"
+    return
+  fi
+  printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s","platform":{"os":"linux","architecture":"%s"}}' "$leaf_digest" "$output_architecture"
+  if [[ "$source_mode" == duplicate ]]; then
+    printf ',{"digest":"%s","platform":{"os":"linux","architecture":"%s"}}' "$leaf_digest" "$output_architecture"
+  fi
+  printf ',{"digest":"sha256:%064d","platform":{"os":"unknown","architecture":"unknown"}}],"sourceMode":"%s","testImage":"%s","testArch":"%s"}' 9 "$source_mode" "$image" "$architecture"
 }
 
 state_file_for() {
@@ -70,6 +117,28 @@ fi
 case "\${3:-}" in
   inspect)
     ref=$4
+    source_image=
+    source_architecture=
+    case "$ref" in
+      "$BROWSER_IMAGE@$BROWSER_DIGEST_AMD64") source_image=$BROWSER_IMAGE; source_architecture=amd64 ;;
+      "$BROWSER_IMAGE@$BROWSER_DIGEST_ARM64") source_image=$BROWSER_IMAGE; source_architecture=arm64 ;;
+      "$MAIN_IMAGE@$MAIN_DIGEST_AMD64") source_image=$MAIN_IMAGE; source_architecture=amd64 ;;
+      "$MAIN_IMAGE@$MAIN_DIGEST_ARM64") source_image=$MAIN_IMAGE; source_architecture=arm64 ;;
+    esac
+    if [[ -n "$source_image" ]]; then
+      if [[ "$*" == *"--raw"* ]]; then
+        source_raw_for "$source_image" "$source_architecture"
+      elif [[ "$*" == *".Image}}"* ]]; then
+        actual_architecture=$source_architecture
+        if [[ "\${SOURCE_MODE:-nested}" == direct-wrong ]]; then
+          if [[ "$source_architecture" == amd64 ]]; then actual_architecture=arm64; else actual_architecture=amd64; fi
+        fi
+        printf '{"os":"linux","architecture":"%s"}' "$actual_architecture"
+      else
+        printf '{"digest":"%s"}' "\${ref##*@}"
+      fi
+      exit 0
+    fi
     state_file=$(state_file_for "$ref")
     if [[ ! -f "$state_file" ]]; then
       echo "manifest unknown: $ref" >&2
@@ -134,18 +203,50 @@ if [[ "\${FAIL_JQ:-0}" == 1 ]]; then
   exit 73
 fi
 arguments="$*"
-if [[ "$arguments" == *"manifests[]?"* && "$arguments" == *"sort | join"* ]]; then
-  if [[ "$input" == *'"testImage":"browser"'* ]]; then
-    printf '%s\n%s\n' "$BROWSER_DIGEST_AMD64" "$BROWSER_DIGEST_ARM64" | LC_ALL=C sort | paste -sd, -
+if [[ "$arguments" == *"--arg architecture"* && "$arguments" == *"| length"* ]]; then
+  case "\${SOURCE_MODE:-nested}" in
+    duplicate) printf '%s\n' 2 ;;
+    missing|wrong) printf '%s\n' 0 ;;
+    *) printf '%s\n' 1 ;;
+  esac
+elif [[ "$arguments" == *"--arg architecture"* && "$arguments" == *"[0].digest"* ]]; then
+  if [[ "$input" == *'ocg-manager-browser'* && "$input" == *'"testArch":"amd64"'* ]]; then
+    printf '%s\n' "$BROWSER_PLATFORM_AMD64"
+  elif [[ "$input" == *'ocg-manager-browser'* ]]; then
+    printf '%s\n' "$BROWSER_PLATFORM_ARM64"
+  elif [[ "$input" == *'"testArch":"amd64"'* ]]; then
+    printf '%s\n' "$MAIN_PLATFORM_AMD64"
   else
-    printf '%s\n%s\n' "$MAIN_DIGEST_AMD64" "$MAIN_DIGEST_ARM64" | LC_ALL=C sort | paste -sd, -
+    printf '%s\n' "$MAIN_PLATFORM_ARM64"
+  fi
+elif [[ "$arguments" == *"manifests[]?"* && "$arguments" == *"sort | join"* ]]; then
+  if [[ "$input" == *'"testImage":"browser"'* ]]; then
+    if [[ "\${SOURCE_MODE:-nested}" == direct* ]]; then
+      printf '%s\n%s\n' "$BROWSER_DIGEST_AMD64" "$BROWSER_DIGEST_ARM64" | LC_ALL=C sort | paste -sd, -
+    else
+      printf '%s\n%s\n' "$BROWSER_PLATFORM_AMD64" "$BROWSER_PLATFORM_ARM64" | LC_ALL=C sort | paste -sd, -
+    fi
+  else
+    if [[ "\${SOURCE_MODE:-nested}" == direct* ]]; then
+      printf '%s\n%s\n' "$MAIN_DIGEST_AMD64" "$MAIN_DIGEST_ARM64" | LC_ALL=C sort | paste -sd, -
+    else
+      printf '%s\n%s\n' "$MAIN_PLATFORM_AMD64" "$MAIN_PLATFORM_ARM64" | LC_ALL=C sort | paste -sd, -
+    fi
   fi
 elif [[ "$arguments" == *"org.opencontainers.image.revision"* ]]; then
   printf '%s\n' "$FULL_SHA"
 elif [[ "$arguments" == *"org.opencontainers.image.version"* ]]; then
   printf '%s\n' "$CANDIDATE_VERSION"
-elif [[ "$arguments" == *"mediaType // empty"* ]]; then
-  printf '%s\n' 'application/vnd.oci.image.index.v1+json'
+elif [[ "$arguments" == *".mediaType"* ]]; then
+  if [[ "$input" == *'"sourceMode":"direct"'* ]]; then
+    printf '%s\n' 'application/vnd.oci.image.manifest.v1+json'
+  else
+    printf '%s\n' 'application/vnd.oci.image.index.v1+json'
+  fi
+elif [[ "$arguments" == *".architecture"* ]]; then
+  printf '%s\n' "$input" | sed -n 's/.*"architecture":"\([^"]*\)".*/\1/p'
+elif [[ "$arguments" == *".os"* ]]; then
+  printf '%s\n' "$input" | sed -n 's/.*"os":"\([^"]*\)".*/\1/p'
 elif [[ "$arguments" == *".mainAdvance"* || "$arguments" == *".browserAdvance"* ]]; then
   printf '%s\n' true
 elif [[ "$arguments" == *".version"* ]]; then
@@ -228,6 +329,8 @@ function createSandbox(t) {
     BROWSER_DIGEST_AMD64: digests.browserAmd64,
     BROWSER_DIGEST_ARM64: digests.browserArm64,
     BROWSER_IMAGE: "ghcr.io/example/ocg-manager-browser",
+    BROWSER_PLATFORM_AMD64: digests.browserAmd64Leaf,
+    BROWSER_PLATFORM_ARM64: digests.browserArm64Leaf,
     CALL_LOG: toBashPath(log),
     CANDIDATE_VERSION: "1.8.0",
     FAKE_BIN: toBashPath(fakeBin),
@@ -239,11 +342,14 @@ function createSandbox(t) {
     MAIN_DIGEST_AMD64: digests.mainAmd64,
     MAIN_DIGEST_ARM64: digests.mainArm64,
     MAIN_IMAGE: "ghcr.io/example/ocg-manager",
+    MAIN_PLATFORM_AMD64: digests.mainAmd64Leaf,
+    MAIN_PLATFORM_ARM64: digests.mainArm64Leaf,
     MINOR_CHANNEL: "1.8",
     PHASE: "publish-immutable",
     PUBLISH_LATEST: "true",
     RUNNER_TEMP: toBashPath(runnerTemp),
     SHORT_SHA: "1234567890ab",
+    SOURCE_MODE: "nested",
     STABLE: "true",
   };
 
@@ -265,7 +371,7 @@ function createSandbox(t) {
           cwd: repositoryRoot,
           encoding: "utf8",
           env: { ...env, ...overrides, PHASE: phase },
-          timeout: 60_000,
+          timeout: 120_000,
         },
       );
     },
@@ -302,7 +408,7 @@ test("any immutable preflight failure exits before every tag create", async (t) 
   }
 });
 
-test("immutable publication reuses dry-run sources and annotations and publishes browser first", (t) => {
+test("provenance source indexes resolve platform leaves while create keeps outer sources", (t) => {
   const sandbox = createSandbox(t);
   const result = sandbox.run("publish-immutable");
   assert.equal(result.status, 0, `${diagnostic(result)}\n${sandbox.log()}`);
@@ -311,6 +417,9 @@ test("immutable publication reuses dry-run sources and annotations and publishes
   const dryRuns = lines.filter((line) => line.startsWith("create|") && line.includes("--dry-run"));
   const creates = createLines(sandbox.log());
   assert.equal(dryRuns.length, 2, sandbox.log());
+  assert.match(dryRuns.join("\n"), new RegExp(digests.browserAmd64.replace(":", "\\:")));
+  assert.match(dryRuns.join("\n"), new RegExp(digests.browserArm64.replace(":", "\\:")));
+  assert.doesNotMatch(dryRuns.join("\n"), new RegExp(digests.browserAmd64Leaf.replace(":", "\\:")));
   assert.deepEqual(
     creates.map((line) => /--tag ([^ ]+)/.exec(line)?.[1]),
     [
@@ -328,6 +437,24 @@ test("immutable publication reuses dry-run sources and annotations and publishes
   }
   assert.match(sandbox.output(), new RegExp(`main_digest=${digests.main}`));
   assert.match(sandbox.output(), new RegExp(`browser_digest=${digests.browser}`));
+});
+
+test("direct platform manifests fall back to their outer digests", (t) => {
+  const sandbox = createSandbox(t);
+  const result = sandbox.run("publish-immutable", { SOURCE_MODE: "direct" });
+  assert.equal(result.status, 0, `${diagnostic(result)}\n${sandbox.log()}`);
+  assert.equal(createLines(sandbox.log()).length, 4, sandbox.log());
+});
+
+test("source resolution rejects missing, duplicate, and wrong-platform children before writes", async (t) => {
+  for (const sourceMode of ["missing", "duplicate", "wrong", "direct-wrong"]) {
+    await t.test(sourceMode, (t) => {
+      const sandbox = createSandbox(t);
+      const result = sandbox.run("publish-immutable", { SOURCE_MODE: sourceMode });
+      assert.notEqual(result.status, 0, diagnostic(result));
+      assert.equal(createLines(sandbox.log()).length, 0, sandbox.log());
+    });
+  }
 });
 
 test("docker, jq, node, and command-substitution failures remain non-zero", async (t) => {
