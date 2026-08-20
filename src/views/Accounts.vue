@@ -1662,9 +1662,11 @@ async function toggleAccount(id: string) {
 }
 
 // Batch toolbar actions. Only ready accounts with a stored key can be pinged
-// or refreshed upstream; pending managed drafts are skipped without a request.
+// or refreshed upstream; pending managed drafts and keyless accounts are
+// skipped without a request. The API never sends the key itself, so presence
+// is read from the has_key flag.
 function batchEligibleAccounts(): Account[] {
-  return accounts.value.filter((account) => accountIsReady(account) && account.key !== "");
+  return accounts.value.filter((account) => accountIsReady(account) && account.has_key);
 }
 
 async function testAllAccounts(): Promise<void> {

@@ -5,7 +5,8 @@ export interface Account {
   name: string;
   username: string;
   password: string;
-  key: string;
+  /** The stored key itself is never sent to the client; this flag reports its presence. */
+  has_key: boolean;
   enabled: boolean;
   account_type: AccountType;
   setup_step: AccountSetupStep;

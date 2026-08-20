@@ -243,7 +243,7 @@ test("accounts page offers batch test and batch usage refresh for eligible accou
   assert.match(source, /:disabled="accounts\.length === 0 \|\| testingAll"/);
   // Only ready accounts with a stored key join a batch sweep.
   assert.match(source, /function batchEligibleAccounts/);
-  assert.match(source, /accountIsReady\(account\) && account\.key !== ""/);
+  assert.match(source, /accountIsReady\(account\) && account\.has_key/);
   // Pings fan out with bounded concurrency and reload the list once at the end;
   // usage refresh stays sequential because the server serializes it globally.
   assert.match(source, /await mapWithConcurrency\(targets, 4, \(account\) =>\s*\n\s*tauriApi\.testAccount\(account\.id\),\s*\n\s*\)/);

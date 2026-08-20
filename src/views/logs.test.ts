@@ -157,7 +157,7 @@ test("account API sends purchase dates and the complete reorder payload", async 
     name: "Second",
     username: "",
     password: "",
-    key: "",
+    has_key: true,
     enabled: true,
     purchase_date: "2026-07-15",
     expires_on: "2026-08-15",

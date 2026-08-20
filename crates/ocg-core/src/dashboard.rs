@@ -461,6 +461,10 @@ struct DashboardAccount {
     username: String,
     password: String,
     key: String,
+    /// Whether the account has a stored key. The key itself is never sent to
+    /// clients; this flag lets the UI tell "routable" apart from keyless
+    /// ready accounts without receiving the secret.
+    has_key: bool,
     enabled: bool,
     account_type: AccountType,
     setup_step: AccountSetupStep,
@@ -514,6 +518,7 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         username: account.username.unwrap_or_default(),
         password: String::new(),
         key: String::new(),
+        has_key: !account.key_cipher.is_empty(),
         enabled: account.enabled,
         account_type: account.account_type,
         setup_step: account.setup_step,
@@ -3851,11 +3856,12 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let dto = dashboard_account(&state, account);
+        let dto = dashboard_account(&state, account.clone());
 
         assert_eq!(dto.username, "user");
         assert!(dto.password.is_empty());
         assert!(dto.key.is_empty());
+        assert!(dto.has_key);
         assert!(!dto.last_error.as_deref().unwrap().contains(OPAQUE_KEY));
         assert!(!dto.auth_error.as_deref().unwrap().contains(OPAQUE_KEY));
         assert_eq!(dto.purchase_date, "2026-01-31");
@@ -3863,6 +3869,18 @@ mod tests {
         let json = serde_json::to_value(dto).expect("dashboard account should serialize");
         assert!(!json.to_string().contains(OPAQUE_KEY));
         assert!(json.get("recharge_date").is_none());
+
+        // A ready account that never stored a key reports has_key=false so the
+        // UI can exclude it from batch sweeps without ever seeing the secret.
+        let keyless = Account {
+            key_cipher: String::new(),
+            last_error: None,
+            auth_error: None,
+            ..account
+        };
+        let keyless_dto = dashboard_account(&state, keyless);
+        assert!(!keyless_dto.has_key);
+        assert!(keyless_dto.key.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
