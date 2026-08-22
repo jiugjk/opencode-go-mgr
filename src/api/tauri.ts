@@ -59,7 +59,17 @@ export interface AccountUpdate {
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
-export type ProxyMode = "auto" | "manual" | "direct";
+export type ProxyMode = "auto" | "manual" | "direct" | "list";
+/** Which leg the listed models take in list proxy mode. */
+export type ProxyListDirection = "whitelist" | "blacklist";
+
+/** One known model backing the list-mode checkbox grid. */
+export interface ProxySupportedModel {
+  id: string;
+  preferred_protocol: string;
+  /** On the registered Zen free channel (egress-IP-shared quota). */
+  zen_free: boolean;
+}
 
 /** Fixed attribution id of the primary key; mirrors the backend constant. */
 export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";
@@ -81,6 +91,10 @@ export interface AppConfig {
   upstream_base_url: string;
   proxy_mode: ProxyMode;
   proxy_url: string;
+  proxy_list_direction: ProxyListDirection;
+  proxy_list_models: string[];
+  /** Known model registry shown as the list-mode checkbox grid. */
+  proxy_supported_models: ProxySupportedModel[];
   opencode_invite_url: string;
   client_root_url: string;
   client_root_url_from_env: boolean;
@@ -233,6 +247,8 @@ export interface ForwardLog {
   client_key_name?: string | null;
   status: string;
   http_status: number | null;
+  /** Route leg label (`auto` / `proxy` / `direct`); empty = not recorded. */
+  route?: string;
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
@@ -566,7 +582,12 @@ export const tauriApi = {
     request<Account>(`/accounts/${id}/browser-profile`, { method: "DELETE" }),
 
   getSettings: () => request<AppConfig>("/settings"),
-  testProxy: (input: Pick<AppConfig, "proxy_mode" | "proxy_url" | "upstream_base_url">) =>
+  testProxy: (
+    input: Pick<
+      AppConfig,
+      "proxy_mode" | "proxy_url" | "upstream_base_url" | "proxy_list_direction"
+    >,
+  ) =>
     request<ProxyTestResult>("/settings/test-proxy", {
       method: "POST",
       body: jsonBody(input),

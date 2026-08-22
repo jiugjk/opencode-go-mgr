@@ -94,9 +94,15 @@ docker compose up -d --no-build
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
-| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna` |
+| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`ox-alpha-free` |
+| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
+| Zen free（Chat） | `big-pickle`、`mimo-v2.5-free`、`hy3-free`、`nemotron-3-ultra-free`、`laguna-s-2.1-free` |
+| Zen free（Responses） | `muse-spark-1.2-contributor-free` |
+
+`ox-alpha-free`（Ox Alpha Free）是 Go 的 Chat 模型，名字里带 `free` 但仍走
+`/zen/go`。只有上表登记的 Zen 促销集合才走 `https://opencode.ai/zen`。Zen
+目录是促销、会变；那些行是 2026-08-21 实测仍可用的集合。
 
 Gemini 只是客户端格式（请求不会发往 Google）。Claude Desktop 别名会改写为
 **应用** 视图里保存的映射。Chat / Messages 上的未知模型保留请求自身协议；

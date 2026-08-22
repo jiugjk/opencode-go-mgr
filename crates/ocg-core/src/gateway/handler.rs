@@ -6,8 +6,8 @@ use crate::gateway::forwarder::{
     rate_limited_response,
 };
 use crate::gateway::free_models::{
-    apply_shared_free_exhaustion, decide_route, is_free_model, resolve_upstream_base,
-    rewrite_body_model,
+    apply_shared_free_exhaustion, decide_route, is_free_model, merge_free_models_into_list,
+    resolve_upstream_base, rewrite_body_model,
 };
 use crate::gateway::protocol::{
     ApiFormat, ProtocolError, RequestPlan, format_error, prepare_gemini_request, prepare_request,
@@ -17,10 +17,10 @@ use crate::gateway::selector::AccountSelector;
 use crate::models::UpstreamChannel;
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
-    ClaudeDesktopModels,
+    ClaudeDesktopModels, FreeModelRouting,
 };
 use crate::state::CoreState;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
@@ -250,7 +250,7 @@ pub async fn models(
 
     let (config, client) = state.upstream_context();
     match forward_get(&client, &state, &config, "/v1/models").await {
-        Ok(resp) => resp,
+        Ok(resp) => attach_free_models_if_enabled(resp, config.free_model_routing).await,
         Err(e) => local_failure_response(
             &state,
             &trace,
@@ -263,6 +263,29 @@ pub async fn models(
             None,
         ),
     }
+}
+
+async fn attach_free_models_if_enabled(resp: Response, policy: FreeModelRouting) -> Response {
+    if policy == FreeModelRouting::Deny || !resp.status().is_success() {
+        return resp;
+    }
+    let status = resp.status();
+    let mut headers = resp.headers().clone();
+    let Ok(bytes) = to_bytes(resp.into_body(), 1024 * 1024).await else {
+        return protocol_error_response(
+            ApiFormat::ChatCompletions,
+            StatusCode::BAD_GATEWAY,
+            "upstream model list is invalid",
+            None,
+        );
+    };
+    let body = merge_free_models_into_list(&bytes).unwrap_or_else(|_| bytes.to_vec());
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::TRANSFER_ENCODING);
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
 }
 
 async fn proxy_handler(
@@ -283,7 +306,7 @@ async fn proxy_handler_inner(
     client_format: ApiFormat,
     claude_desktop: bool,
 ) -> axum::response::Response {
-    let (config, client) = state.upstream_context();
+    let config = state.config();
     let client_body_bytes = body.len();
 
     let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
@@ -349,7 +372,6 @@ async fn proxy_handler_inner(
         client_format,
         plan,
         config,
-        client,
         Some(client_key_id),
     )
     .await
@@ -389,7 +411,7 @@ async fn gemini_proxy_handler(
     model: String,
     stream: bool,
 ) -> axum::response::Response {
-    let (config, client) = state.upstream_context();
+    let config = state.config();
     let client_body_bytes = body.len();
     let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
         return protocol_error_response(
@@ -428,7 +450,6 @@ async fn gemini_proxy_handler(
         ApiFormat::Gemini,
         plan,
         config,
-        client,
         Some(client_key_id),
     )
     .await
@@ -443,12 +464,15 @@ async fn execute_plan(
     client_format: ApiFormat,
     plan: RequestPlan,
     config: AppConfig,
-    client: reqwest::Client,
     client_key_id: Option<String>,
 ) -> axum::response::Response {
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
     let pricing_snapshot = state.pricing_snapshot();
+    // Routing snapshot captured once at entry: every attempt (including after
+    // free fallback rewrites the model) resolves its leg from this snapshot,
+    // and a concurrent settings switch only affects requests starting later.
+    let route_snapshot = state.forward_route_set();
     let conversation_key = if config.conversation_sticky {
         resolve_conversation_key(client_format, &plan.model, &headers, &client_body)
     } else {
@@ -693,8 +717,12 @@ async fn execute_plan(
         let mut retried_same_account = false;
         loop {
             attempt = attempt.saturating_add(1);
+            // Re-resolve the leg on every attempt: free fallback or sticky
+            // rewrites can swap `active_plan.model` mid-request.
+            let (client, route) = route_snapshot.client_for(&active_plan.model);
             match forward_request(
-                &client,
+                client,
+                route,
                 &state,
                 &account,
                 &config,

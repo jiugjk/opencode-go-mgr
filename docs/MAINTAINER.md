@@ -208,7 +208,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   official multiplier. A fetched snapshot derives it as
   `monthly limit / Usage`; the protected multiplier update endpoint may
   persist user overrides for temporary promotions under a new immutable
-  revision.
+  revision. Official Go rows whose Input/Output/Usage cells are all dashes
+  (currently Ox Alpha Free / `ox-alpha-free`) are skipped as unpriced Go
+  promos — they are not Zen free and must not fail a pricing refresh.
 - Pricing refresh is user-triggered through protected
   `GET /dashboard/api/pricing`, `PUT /dashboard/api/pricing/multipliers`, and
   `POST /dashboard/api/pricing/refresh`. A refresh whose official multipliers
@@ -223,7 +225,10 @@ difference, and the Claude Desktop three-role persistence behavior.
   never trigger a supplier-site request.
 - `forwarder.rs` returns an explicit action to `handler.rs`: only a pre-send
   DNS/TCP/TLS connection failure can retry once on the same account;
-  `401`/`403` and Go-channel `429` can select another account. A free-channel
+  `403` and Go-channel `429` can select another account. Inference `401` is
+  returned as-is without rotating accounts or persisting `auth_error` (Go uses
+  401 for `ModelError` as well as invalid keys). Dashboard ping / key
+  verification still record `auth_error` on 401. A free-channel
   `429` cools the IP-shared free pool and does not rotate keys; prefer mode
   then falls back to Go. `408`, `5xx`, post-connect failures, body timeouts,
   and stream interruptions are never replayed, and ambiguous results are

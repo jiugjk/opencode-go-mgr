@@ -122,7 +122,7 @@ pub struct CoreStateInner {
     desktop_update_starter: OnceLock<DesktopUpdateStarter>,
     desktop_update_status: Mutex<DesktopUpdateStatus>,
     pub dashboard_dir: Mutex<Option<PathBuf>>,
-    http_client: Mutex<reqwest::Client>,
+    http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
     pub routing: crate::gateway::routing::RoutingRuntime,
@@ -191,7 +191,7 @@ impl CoreStateInner {
                 snapshot
             }
         };
-        let http_client = crate::http_client::build(&config)?;
+        let http_client = crate::http_client::build_route_set(&config)?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -212,7 +212,7 @@ impl CoreStateInner {
             desktop_update_starter: OnceLock::new(),
             desktop_update_status: Mutex::new(DesktopUpdateStatus::new()),
             dashboard_dir: Mutex::new(None),
-            http_client: Mutex::new(http_client),
+            http_client: Mutex::new(Arc::new(http_client)),
             pricing: RwLock::new(Arc::new(pricing)),
             pricing_refresh: tokio::sync::Mutex::new(()),
             routing: crate::gateway::routing::RoutingRuntime::new(),
@@ -253,7 +253,15 @@ impl CoreStateInner {
     pub fn upstream_context(&self) -> (AppConfig, reqwest::Client) {
         let config = self.config.lock();
         let client = self.http_client.lock();
-        (config.clone(), client.clone())
+        (config.clone(), client.default_client().clone())
+    }
+
+    /// Clones the whole route set as one snapshot: routing metadata and both
+    /// leg clients come from the same `set_config` generation, so in-flight
+    /// requests fly on internally consistent routing even across hot config
+    /// switches.
+    pub(crate) fn forward_route_set(&self) -> Arc<crate::http_client::ForwardRouteSet> {
+        self.http_client.lock().clone()
     }
 
     pub fn pricing_snapshot(&self) -> Arc<PricingSnapshot> {
@@ -442,7 +450,7 @@ impl CoreStateInner {
             .map_err(anyhow::Error::msg)?;
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
-        let http_client = crate::http_client::build(&config)?;
+        let http_client = crate::http_client::build_route_set(&config)?;
         {
             let db = self.db.lock();
             save_config(&db, &config)?;
@@ -459,7 +467,7 @@ impl CoreStateInner {
                 || current_config.conversation_sticky != config.conversation_sticky
                 || current_config.gateway_key != config.gateway_key;
             *current_config = config.clone();
-            *current_client = http_client;
+            *current_client = Arc::new(http_client);
             should_reset
         };
         // Refresh the primary entry in the credential snapshot so auth stops
@@ -857,6 +865,47 @@ mod tests {
             0,
             "completed recovery should remove its journal"
         );
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn route_set_snapshot_swaps_atomically_and_stays_self_consistent() {
+        use crate::crypto::{KeyCipher, StaticKeyCipher};
+
+        let dir = temp_data_dir("route-set-swap");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        let entry_snapshot = state.forward_route_set();
+        assert!(
+            std::ptr::eq(
+                entry_snapshot.client_for("gpt-5.6-luna").0,
+                state.forward_route_set().default_client()
+            ),
+            "non-list generations resolve to the single process-wide client"
+        );
+
+        let mut list_config = state.config();
+        list_config.gateway_key = "gw".into();
+        list_config.proxy_mode = crate::models::ProxyMode::List;
+        list_config.proxy_url = "http://127.0.0.1:7890".into();
+        list_config.proxy_list_direction = crate::models::ProxyListDirection::Whitelist;
+        list_config.proxy_list_models = vec!["gpt-5.6-luna".to_string()];
+        state
+            .set_config(list_config)
+            .expect("list config should save");
+
+        // The active set was replaced wholesale with the new generation.
+        let next_snapshot = state.forward_route_set();
+        assert_eq!(next_snapshot.client_for("gpt-5.6-luna").1.as_str(), "proxy");
+        assert_eq!(next_snapshot.client_for("glm-5.3").1.as_str(), "direct");
+
+        // The in-flight snapshot keeps its own consistent routing: same model,
+        // same old label, even though the config generation moved on.
+        assert_eq!(entry_snapshot.client_for("gpt-5.6-luna").1.as_str(), "auto");
+
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }

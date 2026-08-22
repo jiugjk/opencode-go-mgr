@@ -581,7 +581,7 @@ export const enUSMessages = {
   "Free 模型策略": "Free model policy",
   "控制是否允许使用 OpenCode Zen 免费模型，以及是否在上下文允许时把同名 Go 请求优先路由到 free。": "Control whether OpenCode Zen free models are allowed, and whether matching Go requests may prefer free twins when context fits.",
   "禁止 Free 模型": "Deny free models",
-  "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。": "Reject all free / big-pickle requests and never rewrite Go models onto free twins.",
+  "拒绝已登记的 Zen free 模型（如 big-pickle），不拦截 Go 上名字带 free 的模型（如 ox-alpha-free），也不把 Go 模型改写到 Zen。": "Reject registered Zen free models (such as big-pickle). Go models whose ids happen to contain free (such as ox-alpha-free) stay on Go. Never rewrite Go models onto Zen.",
   "仅显式使用 Free 模型": "Explicit free only",
   "只有客户端显式请求 free 模型时才走 Zen free 通道；Go 模型保持 Go 上游。Free 按 IP 限额，429 后整通道冷却，不换 Key。": "Only client-requested free models use the Zen free channel; Go models stay on Go. Free quota is per egress IP: a 429 cools the whole free channel without rotating keys.",
   "自动优先同名 Free 模型": "Prefer mapped free models",
@@ -618,6 +618,27 @@ export const enUSMessages = {
   "未归因": "Unattributed",
   "升级前用量统一计入主 Key": "Usage from before the upgrade is attributed to the primary Key",
   "加载 Key 筛选失败: {error}": "Failed to load the Key filter: {error}",
+
+  // list proxy mode (per-model routing)
+  "按模型名单": "Per-model list",
+  "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。": "Split routing by model list: only listed models follow the direction through the proxy or direct; “Test connection” probes the direction's default leg.",
+  "名单方向": "List direction",
+  "白名单（名单内走代理）": "Whitelist (listed via proxy)",
+  "黑名单（名单内直连）": "Blacklist (listed direct)",
+  "名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。": "Listed models use the proxy URL; unlisted models connect directly. Non-chat outbound traffic (pricing / usage / update checks) goes direct.",
+  "名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。": "Listed models connect directly; unlisted models use the proxy URL. Non-chat outbound traffic (pricing / usage / update checks) uses the proxy URL.",
+  "名单内模型": "Listed models",
+  "Zen free 额度按出口 IP 共享，走代理会改变额度归属": "Zen free quota is shared by egress IP; routing through a proxy changes which quota it belongs to",
+  "存储名单包含未知模型": "Stored list contains unknown models",
+  "保存时将被忽略：{ids}": "They will be ignored on save: {ids}",
+  "名单模式需要填写代理地址": "List proxy mode requires a proxy URL",
+  "名单模式至少勾选一个模型": "List proxy mode requires at least one model",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "List mode splits chat forwarding by model; non-chat outbound traffic (account tests, usage, pricing, update checks) follows the direction's default leg.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Tests the current form values without saving; this probes the direction's default leg, not the real forwarding path of a listed model.",
+  "路由": "Route",
+  "自动": "Auto",
+  "代理": "Proxy",
+  "直连": "Direct",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

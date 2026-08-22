@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use ocg_core::crypto::MachineBoundCipher;
 use ocg_core::db::Database;
+use ocg_core::gateway::free_models::is_free_model;
 use ocg_core::state::CoreStateInner;
 use serde_json::{Value, json};
 
@@ -51,6 +52,7 @@ const OFFICIAL_PREFERRED: &[(&str, Endpoint)] = &[
     ("qwen3.7-plus", Endpoint::Messages),
     ("qwen3.6-plus", Endpoint::Messages),
     ("hy3", Endpoint::Chat),
+    ("ox-alpha-free", Endpoint::Chat),
 ];
 
 const CONVERSATION: &[&str] = &[
@@ -356,7 +358,7 @@ fn official_preferred(model: &str) -> Option<Endpoint> {
 }
 
 fn is_free_or_pickle(model: &str) -> bool {
-    model.ends_with("-free") || model == "big-pickle"
+    is_free_model(model)
 }
 
 fn detail(result: &ProbeResult) -> String {

@@ -450,6 +450,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
 
     let mut models = Vec::new();
     let mut seen_tiers = HashSet::new();
+    let mut unpriced_ids = HashSet::new();
     for row in pricing_table.iter().skip(1) {
         if row.len() != 6 {
             bail!("OpenCode Go pricing table contains an incomplete row");
@@ -459,6 +460,12 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
             .get(&canonical_display_name(&display_name))
             .cloned()
             .ok_or_else(|| anyhow!("no official model ID found for {display_name}"))?;
+        // Official Go docs list limited-time promos such as Ox Alpha Free with
+        // dash prices. They stay on `/zen/go` but have no USD rates to ingest.
+        if is_unpriced_promo_row(row) {
+            unpriced_ids.insert(id);
+            continue;
+        }
         let (minimum, maximum) = parse_token_tier(&display_name)?;
         let time_window = parse_time_window(&display_name);
         if !seen_tiers.insert((id.clone(), minimum, maximum, time_window)) {
@@ -502,7 +509,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
         .collect::<HashSet<_>>();
     let missing_prices = seen_model_ids
         .iter()
-        .filter(|id| !covered.contains(id.as_str()))
+        .filter(|id| !covered.contains(id.as_str()) && !unpriced_ids.contains(id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     if !missing_prices.is_empty() {
@@ -735,6 +742,14 @@ fn parse_token_tier(name: &str) -> Result<(Option<i64>, Option<i64>)> {
         bail!("unrecognized token tier in {name}");
     }
     Ok((None, None))
+}
+
+fn is_placeholder_price(value: &str) -> bool {
+    matches!(value.trim(), "-" | "—" | "–")
+}
+
+fn is_unpriced_promo_row(row: &[String]) -> bool {
+    row.len() == 6 && row.iter().skip(1).all(|cell| is_placeholder_price(cell))
 }
 
 fn parse_dollar(value: &str, allow_dash: bool) -> Result<Option<f64>> {
@@ -1197,7 +1212,12 @@ mod tests {
 
     #[test]
     fn zen_free_models_do_not_enter_go_quota() {
-        for model_id in ["deepseek-v4-flash-free", "mimo-v2.5-free", "big-pickle"] {
+        for model_id in [
+            "mimo-v2.5-free",
+            "big-pickle",
+            "hy3-free",
+            "muse-spark-1.2-contributor-free",
+        ] {
             let estimate = embedded_seed().estimate(model_id, 1000, 100, 0, 0, None);
             assert_eq!(estimate.cost, None, "{model_id}");
             assert_eq!(estimate.cost_state, "free", "{model_id}");
@@ -1206,6 +1226,12 @@ mod tests {
         let paid = embedded_seed().estimate("deepseek-v4-flash", 1000, 100, 0, 0, None);
         assert_eq!(paid.cost_state, "priced");
         assert!(paid.cost.is_some());
+        let go_named_free = embedded_seed().estimate("ox-alpha-free", 1000, 100, 0, 0, None);
+        assert_eq!(go_named_free.cost_state, "unpriced");
+        assert_ne!(go_named_free.cost_state, "free");
+        let suffix_is_not_zen =
+            embedded_seed().estimate("brand-new-promo-free", 1000, 100, 0, 0, None);
+        assert_eq!(suffix_is_not_zen.cost_state, "unpriced");
     }
 
     #[test]
@@ -1256,6 +1282,13 @@ mod tests {
                 .models
                 .iter()
                 .any(|entry| entry.model_id == "hy3" && entry.quota_multiplier == 1.0)
+        );
+        assert!(
+            !snapshot
+                .models
+                .iter()
+                .any(|entry| entry.model_id == "ox-alpha-free"),
+            "dash-priced Go promos must not enter the USD snapshot"
         );
         let luna_tiers = snapshot
             .models

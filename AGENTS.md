@@ -18,7 +18,7 @@
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
-- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。
+- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连与按模型名单（List）。非 List 模式维持三选一；List 模式（`proxy_list_direction` 白/黑名单 + `proxy_list_models` 已知模型 id）下聊天转发与非模型出站共用“默认段 + 例外段”规则：名单内模型走方向例外段（白名单→代理 / 黑名单→直连），名单外模型与非模型出站（账号测试、用量、价格、升级下载）走方向默认段（白名单→直连 / 黑名单→代理）。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径全量容忍（`AppConfig::validate` 只查 List 的 URL）。reqwest 路径复用 `http_client.rs` 的路由集/`configured_builder`，Tauri updater 用其 `proxy` / `no_proxy` 对齐默认段，不得按账号配置或绕过。转发按请求入口快照选路，配置热切换不影响在飞请求。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
 - 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；面板只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。内置种子快照是 `crates/ocg-core/src/pricing-seed.json`（`include_str!` 编译进二进制），由 `cargo run -p ocg-core --example export_pricing_seed` 用同一运行时解析器从官方页导出；`release.yml` 每次构建前刷新该文件（失败即中止构建），本地提交的 JSON 是离线构建兜底。改 seed 数据只改 JSON，勿在 `pricing.rs` 里手写模型行。
@@ -28,7 +28,7 @@
 - 下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖只读且不得写回 SQLite。
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（也接受 `/v1/models/...`），可用 `x-goog-api-key` 鉴权；Gemini 只是客户端格式，Gateway 始终转换到已知模型的推荐上游协议。
 - 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`grok-4.5` 仅 `supported = Responses`（Chat 入口须转换）。`gpt-5.6-luna` preferred 仍是 Responses，但 Chat 已可透传。
-- Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit` / `prefer`（默认）；Zen free 与 Go 使用独立 `cooldown_free_until`。Zen free 额度按出口 IP 共享，429 后整条 free 通道冷却，不换 Key 重试；401/403 仍按账号故障切换。prefer 仅映射 `deepseek-v4-flash`/`mimo-v2.5`，上下文粗估装得下才降级，free 耗尽回落 Go。free 通道成功行记 `cost_state=free`，不计入 Go 额度。
+- Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit`（默认）/ `prefer`；Zen free 与 Go 使用独立 `cooldown_free_until`。Zen free 是 `free_models.rs` 的显式名单（`big-pickle` 与已登记 Zen 促销 id），**不是** `-free` 后缀。Go 文档里的 `ox-alpha-free`（Ox Alpha Free，Chat，`/zen/go/v1/chat/completions`）走 Go，官方价格列为 `-`，计 `unpriced` 不计 `cost_state=free`。GET `/v1/models` 在非 deny 时会并入已知 Zen free id。Zen free 额度按出口 IP 共享，429 后整条 free 通道冷却，不换 Key 重试；403 仍按账号故障切换。推理 `401` 原样返回给客户端、不换号、不写 `auth_error`（Go 会把 ModelError「模组不存在」打成 401）；面板 Ping / Key 验证的 401 仍记录 `auth_error`。prefer 仅映射 `mimo-v2.5`（`deepseek-v4-flash-free` 已不可用），上下文粗估装得下才降级，free 耗尽回落 Go。`muse-spark-1.2-contributor` 实测 Chat+Responses 透传；Zen 侧 `muse-spark-1.2-contributor-free` 仍为 Responses-only。free 通道成功行记 `cost_state=free`，不计入 Go 额度。
 - Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`；`sonnet`、`opus`、`haiku` 映射保存在 `AppConfig.claude_desktop_models`，由受保护的 `GET/PUT /dashboard/api/claude-desktop/models` 管理。
 - 托管账号（Beta）：`setup_step` 为 `google_account`（UI：登录身份，可跳过）→ `opencode_registration` → `payment` → `key_verification` → `ready`。`PATCH .../setup` 允许前进一格或回退更早步骤，禁止跳步与直接 `ready`。创建草稿可编辑邀请链接并写回 `opencode_invite_url`（`DEFAULT_OPENCODE_INVITE_URL` 为演示默认）。浏览器目标含 Google/GitHub 注册与登录、邀请 URL、控制台 `https://opencode.ai/auth`。
 - 已完成账号的额度：官方 `https://opencode.ai/zen/go/v1/usage`（`go_usage.rs`）是周期性校准基线；本地 forward_logs 在上次成功校准后仍做实时估算。`usage_sync.rs` 协调手动与后台路径：ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用/非 ready/空 Key 不自动刷新。全局并发 1、带抖动与可注入 clock/jitter/fetch 缝；启动不轰鸣。手动 `POST /dashboard/api/accounts/{id}/usage/refresh` 仍可用，服务端每账号 60s 节流（成功/失败都算），并发去重，返回 Retry-After/`next_allowed_at`；失败保留上次基线与 last-success。本地最大 Go 用量 ≥80% 时最多每 15 分钟加速对账一次。真实推理 429 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方对账（不 inline）；官方失败或 `status=rate-limited` 永不写推理冷却。成功后按最早 `resetsAt`（加有界抖动）并尊重活跃/非活跃节奏再调度。失败退避：5m → 15m → 1h → 6h。sync 元数据落在 accounts 表（schema v21）。共享实现含 CAS/三窗口原子校准与全局代理；同一事务在三个窗口均有余量时顺带清除 auth_error（官方 2xx 证明 Key 有效；任一窗口耗尽则保持熔断，避免立刻撞 429）。公开 Go docs 尚未列出该 endpoint。`console_usage.rs` 已冻结弃用，至少两个 minor 且有稳定真号证据后再删。勿为刷新引入 CDP 自动化。
@@ -37,12 +37,12 @@
 
 - `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
 - `crates/ocg-core/src/gateway_keys.rs`：子 Key 生命周期门面（`sub_gateway_keys` CRUD 封装、凭证快照构建/重建、`PRIMARY_KEY_ID` 常量、跨层值唯一闸口）；改 Key 存储或鉴权快照时从这里入手。
-- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
+- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略；持有路由集 `ForwardRouteSet`（默认段+例外段双客户端、`client_for(model)` 纯函数选路、List 分支的 `configured_builder` 方向默认段）。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/go_usage.rs`：官方 Go usage 客户端（`/zen/go/v1/usage`）；手动与调度刷新共用。
 - `crates/ocg-core/src/usage_sync.rs`：自适应官方用量同步（节流、去重、活跃/非活跃节奏、80% 加速、429/reset 调度、失败退避）。后台循环按 `CoreState` 启停（Gateway start 时 spawn，随 CoreState drop 退出；不是可取消的 per-Gateway task）。失败退避地板不可被阈值/节奏/reset 提前；真实推理 429 的 1–2 分钟调度是刻意覆盖。
 - `crates/ocg-core/src/console_usage.rs`：冻结弃用的 Profile Cookie/HTML 控制台用量实现；勿调用、勿扩展。
-- `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
+- `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询；`forward_logs` 自 schema v22 起带 `route` 列（`auto`/`proxy`/`direct` 闭集，历史行空串=未记录）。
 - `crates/ocg-core/src/models.rs`：共享 serde 类型和 `AppConfig`（含 `DEFAULT_OPENCODE_INVITE_URL`）。
 - `crates/ocg-core/src/pricing.rs`：OpenCode Go 价格快照、倍率与额度估算。
 - `crates/ocg-cli/src/main.rs`：CLI `serve`、`key`、`status`。

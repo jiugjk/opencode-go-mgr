@@ -177,6 +177,12 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "muse-spark-1.2-contributor",
         preferred: ApiFormat::Responses,
+        supported: CHAT_AND_RESPONSES,
+        effort_aliases: MUSE_SPARK_EFFORT_ALIASES,
+    },
+    ModelProtocol {
+        id: "muse-spark-1.2-contributor-free",
+        preferred: ApiFormat::Responses,
         supported: RESPONSES_ONLY,
         effort_aliases: MUSE_SPARK_EFFORT_ALIASES,
     },
@@ -230,6 +236,14 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     },
     ModelProtocol {
         id: "hy3",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
+    },
+    ModelProtocol {
+        // Official Go docs: Ox Alpha Free, Chat Completions on `/zen/go`.
+        // The id contains `free` but this is not a Zen promo model.
+        id: "ox-alpha-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
         effort_aliases: NO_EFFORT_ALIASES,
@@ -301,6 +315,12 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
         effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
+        id: "hy3-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
+    },
+    ModelProtocol {
         id: "deepseek-v4-flash-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
@@ -342,11 +362,32 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
         supported: CHAT_ONLY,
         effort_aliases: NO_EFFORT_ALIASES,
     },
+    ModelProtocol {
+        id: "nemotron-3.5-lightning-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
+    },
 ];
 
 /// Returns every model ID with a known preferred upstream protocol.
 pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
     MODEL_PROTOCOLS.iter().map(|profile| profile.id)
+}
+
+/// Returns (id, preferred protocol) for every known model; backs the proxy
+/// list picker's protocol hints. Same registry as `supported_model_ids`.
+pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFormat)> {
+    MODEL_PROTOCOLS
+        .iter()
+        .map(|profile| (profile.id, profile.preferred))
+}
+
+/// Known catalog models (Go + registered Zen free). Used as the 401 auth-breaker
+/// allowlist: an unknown model that upstream rejects must not permanently mark
+/// the account as unauthorized.
+pub fn is_known_model(model: &str) -> bool {
+    model_protocol(model).is_some()
 }
 
 const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
@@ -3473,6 +3514,96 @@ mod tests {
     }
 
     #[test]
+    fn ox_alpha_free_is_chat_only_known_model() {
+        assert!(is_known_model("ox-alpha-free"));
+        assert!(!is_known_model("x-preview-f-free"));
+        assert!(!is_known_model("totally-made-up-xyz"));
+        let plan = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "ox-alpha-free",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .expect("Chat should passthrough Ox Alpha Free");
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+        let gemini = prepare_gemini_request(
+            "ox-alpha-free".into(),
+            false,
+            bytes(json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]})),
+        )
+        .expect("Gemini should convert Ox Alpha Free to Chat");
+        assert_eq!(gemini.upstream, ApiFormat::ChatCompletions);
+        let responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "ox-alpha-free",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .expect("Responses should convert Ox Alpha Free to Chat");
+        assert_eq!(responses.upstream, ApiFormat::ChatCompletions);
+    }
+
+    #[test]
+    fn muse_spark_contributor_passthroughs_chat_and_responses() {
+        let chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "muse-spark-1.2-contributor",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .expect("Chat should passthrough Muse Spark contributor");
+        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+        let responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "muse-spark-1.2-contributor",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .expect("Responses should passthrough Muse Spark contributor");
+        assert_eq!(responses.upstream, ApiFormat::Responses);
+        let messages = prepare_request(
+            ApiFormat::Messages,
+            bytes(json!({
+                "model": "muse-spark-1.2-contributor",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .expect("Messages should convert Muse Spark contributor to Responses");
+        assert_eq!(messages.upstream, ApiFormat::Responses);
+    }
+
+    #[test]
+    fn muse_spark_contributor_free_is_responses_only() {
+        assert!(is_known_model("muse-spark-1.2-contributor-free"));
+        let chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "muse-spark-1.2-contributor-free",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .expect("Chat should convert Muse Spark free to Responses");
+        assert_eq!(chat.upstream, ApiFormat::Responses);
+        let responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "muse-spark-1.2-contributor-free",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .expect("Responses should passthrough Muse Spark free");
+        assert_eq!(responses.upstream, ApiFormat::Responses);
+    }
+
+    #[test]
     fn multi_protocol_models_passthrough_supported_formats() {
         // deepseek-v4-flash: 2026-08-14 probe accepts Chat, Responses, and Messages.
         let flash_responses = prepare_request(
@@ -5159,7 +5290,7 @@ mod tests {
             (
                 ApiFormat::ChatCompletions,
                 json!({
-                    "model":"muse-spark-1.2-contributor","messages":[{"role":"user","content":"hi"}],
+                    "model":"muse-spark-1.2","messages":[{"role":"user","content":"hi"}],
                     "reasoning_effort":"max"
                 }),
             ),

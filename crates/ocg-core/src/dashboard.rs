@@ -4,10 +4,12 @@ use crate::browser::{
 };
 use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
 use crate::gateway::{
-    diagnostics::{redact_known_secret, sanitize_upstream_error_value_with_known_secret},
+    diagnostics::{
+        api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
+    },
     forwarder::forward_get,
     limit::{parse_reset, parse_usage_limit_window},
-    protocol::supported_model_ids,
+    protocol::{supported_model_ids, supported_model_protocols},
 };
 use crate::go_usage::GoUsageError;
 use crate::models::*;
@@ -2027,6 +2029,16 @@ async fn reset_account_cooldown(
     Ok(Json(dashboard_account(&state, account)))
 }
 
+/// One known model entry backing the list-mode checkbox grid. `zen_free`
+/// follows the registered Zen promo allowlist (not a `-free` suffix — Go
+/// catalog ids may contain `free` without being on the free channel).
+#[derive(Serialize)]
+struct ProxySupportedModel {
+    id: String,
+    preferred_protocol: &'static str,
+    zen_free: bool,
+}
+
 #[derive(Serialize)]
 struct SettingsResponse {
     #[serde(flatten)]
@@ -2035,6 +2047,7 @@ struct SettingsResponse {
     auto_start_supported: bool,
     dock_visibility_supported: bool,
     client_root_url_from_env: bool,
+    proxy_supported_models: Vec<ProxySupportedModel>,
 }
 
 async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> {
@@ -2046,6 +2059,13 @@ async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> 
         auto_start_supported,
         dock_visibility_supported: state.dock_visibility_supported(),
         client_root_url_from_env: state.client_root_url_from_env(),
+        proxy_supported_models: supported_model_protocols()
+            .map(|(id, preferred)| ProxySupportedModel {
+                id: id.to_string(),
+                preferred_protocol: api_format_name(preferred),
+                zen_free: crate::gateway::free_models::free_model_ids().any(|free| free == id),
+            })
+            .collect(),
     })
 }
 
@@ -2054,6 +2074,11 @@ struct ProxyTestRequest {
     proxy_mode: ProxyMode,
     #[serde(default)]
     proxy_url: String,
+    /// Optional list-mode direction override; omitted means "use the
+    /// direction currently persisted in config". Only affects which leg the
+    /// test builds — URL validation treats list mode like manual mode.
+    #[serde(default)]
+    proxy_list_direction: Option<ProxyListDirection>,
     upstream_base_url: String,
 }
 
@@ -2070,6 +2095,9 @@ async fn test_proxy(
 ) -> Result<Json<ProxyTestResponse>, ApiError> {
     let mut config = state.config();
     config.proxy_mode = input.proxy_mode;
+    if let Some(direction) = input.proxy_list_direction {
+        config.proxy_list_direction = direction;
+    }
     config.proxy_url =
         normalize_proxy_url(config.proxy_mode, &input.proxy_url).map_err(ApiError::bad_request)?;
     config.upstream_base_url = input
@@ -2380,7 +2408,7 @@ struct SettingsUpdateRequest {
     expected_revision: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct SettingsRevisionResponse {
     revision: u64,
 }
@@ -2418,6 +2446,7 @@ async fn update_settings(
     let previous_config = state.config();
     config.claude_desktop_models = previous_config.claude_desktop_models.clone();
     config.validate().map_err(ApiError::bad_request)?;
+    validate_proxy_list(&mut config).map_err(ApiError::bad_request)?;
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url =
         normalize_client_root_url(&config.client_root_url).map_err(ApiError::bad_request)?;
@@ -2472,6 +2501,31 @@ async fn update_settings(
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),
     }))
+}
+
+/// Write-gate validation for list proxy mode. Only the dashboard save path
+/// enforces list contents (non-empty, exact known registry ids, deduped);
+/// `AppConfig::validate` deliberately stays registry-free so future registry
+/// shrinks never brick the load path of persisted configs.
+fn validate_proxy_list(config: &mut AppConfig) -> Result<(), String> {
+    if config.proxy_mode != ProxyMode::List {
+        return Ok(());
+    }
+    if config.proxy_list_models.is_empty() {
+        return Err("list proxy mode requires at least one model".to_string());
+    }
+    let mut deduped: Vec<String> = Vec::new();
+    for model in config.proxy_list_models.iter() {
+        let model = model.trim();
+        if !supported_model_ids().any(|supported| supported == model) {
+            return Err(format!("unknown model in proxy list: `{model}`"));
+        }
+        if !deduped.iter().any(|existing| existing == model) {
+            deduped.push(model.to_string());
+        }
+    }
+    config.proxy_list_models = deduped;
+    Ok(())
 }
 
 async fn update_settings_route(
@@ -3127,7 +3181,7 @@ mod tests {
         SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup,
         apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path, create_account,
         create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
-        is_update_available, load_ready_account_for_official_go_usage,
+        forward_logs, get_settings, is_update_available, load_ready_account_for_official_go_usage,
         map_official_usage_refresh_error, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
@@ -3138,15 +3192,18 @@ mod tests {
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::{AccountUsageCalibrationSnapshot, Database};
+    use crate::gateway::diagnostics::api_format_name;
+    use crate::gateway::protocol::supported_model_protocols;
     use crate::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
     use crate::models::{
         Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
-        ClaudeDesktopModels, ProxyMode, UsageWindow, normalize_purchase_date, purchase_expires_on,
+        ClaudeDesktopModels, ForwardLog, ProxyListDirection, ProxyMode, UsageWindow,
+        normalize_purchase_date, purchase_expires_on,
     };
     use crate::pricing::stamp_pricing_activation;
     use crate::state::CoreStateInner;
     use axum::Json;
-    use axum::extract::{Path as AxumPath, State};
+    use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{HeaderMap, StatusCode, header};
     use chrono::Utc;
     use std::collections::BTreeMap;
@@ -3281,6 +3338,7 @@ mod tests {
             State(state.clone()),
             Json(ProxyTestRequest {
                 proxy_mode: ProxyMode::Direct,
+                proxy_list_direction: None,
                 proxy_url: String::new(),
                 upstream_base_url: format!("http://{address}"),
             }),
@@ -3301,6 +3359,7 @@ mod tests {
             State(state.clone()),
             Json(ProxyTestRequest {
                 proxy_mode: ProxyMode::Manual,
+                proxy_list_direction: None,
                 proxy_url: format!("http://{closed_proxy_address}"),
                 upstream_base_url: format!("http://{address}"),
             }),
@@ -4883,6 +4942,340 @@ mod tests {
         .expect("regular settings should save");
 
         assert_eq!(state.config().claude_desktop_models, configured);
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_proxy_settings_write_gate_validates_and_dedupes() {
+        let dir = temp_data_dir("list-proxy-write-gate");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let empty_list = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            ..AppConfig::default()
+        };
+        let error = update_settings(
+            State(state.clone()),
+            Json(SettingsUpdateRequest {
+                config: empty_list,
+                expected_revision: Some(state.settings_revision()),
+            }),
+        )
+        .await
+        .expect_err("empty list must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        let unknown_id = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            proxy_list_models: vec!["gpt-5.6-luna".to_string(), "wildcard-*".to_string()],
+            ..AppConfig::default()
+        };
+        let error = update_settings(
+            State(state.clone()),
+            Json(SettingsUpdateRequest {
+                config: unknown_id,
+                expected_revision: Some(state.settings_revision()),
+            }),
+        )
+        .await
+        .expect_err("unknown ids must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        // Missing URL under list mode fails the shared validate() gate.
+        let missing_url = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: String::new(),
+            proxy_list_models: vec!["gpt-5.6-luna".to_string()],
+            ..AppConfig::default()
+        };
+        let error = update_settings(
+            State(state.clone()),
+            Json(SettingsUpdateRequest {
+                config: missing_url,
+                expected_revision: Some(state.settings_revision()),
+            }),
+        )
+        .await
+        .expect_err("list mode without a proxy URL must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        // Previous config stays active after every rejection.
+        assert_eq!(state.config().proxy_mode, ProxyMode::Auto);
+
+        let revision_before = state.settings_revision();
+        let duplicated = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            proxy_list_direction: ProxyListDirection::Blacklist,
+            proxy_list_models: vec![
+                "  gpt-5.6-luna ".to_string(),
+                "grok-4.5".to_string(),
+                "gpt-5.6-luna".to_string(),
+            ],
+            ..AppConfig::default()
+        };
+        let saved = update_settings(
+            State(state.clone()),
+            Json(SettingsUpdateRequest {
+                config: duplicated,
+                expected_revision: Some(state.settings_revision()),
+            }),
+        )
+        .await
+        .expect("deduped known ids should save");
+        assert!(saved.revision > revision_before);
+        let persisted = state.config();
+        assert_eq!(persisted.proxy_mode, ProxyMode::List);
+        assert_eq!(
+            persisted.proxy_list_direction,
+            ProxyListDirection::Blacklist
+        );
+        assert_eq!(
+            persisted.proxy_list_models,
+            vec!["gpt-5.6-luna".to_string(), "grok-4.5".to_string()]
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_response_lists_supported_models_with_protocol_hints() {
+        let models = supported_model_protocols()
+            .map(|(id, preferred)| (id, api_format_name(preferred)))
+            .collect::<Vec<_>>();
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|(id, _)| *id == "gpt-5.6-luna"));
+        assert!(models.iter().all(|(_, protocol)| {
+            matches!(
+                *protocol,
+                "chat_completions" | "responses" | "messages" | "gemini"
+            )
+        }));
+        let unique: std::collections::HashSet<&str> = models.iter().map(|(id, _)| *id).collect();
+        assert_eq!(unique.len(), models.len(), "ids must be unique");
+    }
+
+    #[tokio::test]
+    async fn settings_get_response_includes_proxy_supported_models() {
+        let dir = temp_data_dir("settings-get-shape");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let Json(response) = get_settings(State(state.clone())).await;
+        let encoded = serde_json::to_value(&response).unwrap();
+        let models = encoded["proxy_supported_models"]
+            .as_array()
+            .expect("proxy_supported_models must serialize as an array");
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|model| {
+            model["id"].is_string()
+                && model["preferred_protocol"].is_string()
+                && model["zen_free"].as_bool().is_some()
+        }));
+        assert!(models.iter().any(|model| model["id"] == "gpt-5.6-luna"));
+        // The free-channel hint follows the Zen promo allowlist, not the -free suffix.
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "mimo-v2.5-free" && model["zen_free"] == true)
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "ox-alpha-free" && model["zen_free"] == false)
+        );
+        // Suffixless Zen free ids must be flagged too — the exact case the old
+        // ends-with check would have missed.
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "big-pickle" && model["zen_free"] == true)
+        );
+        // Flattened config fields stay at the top level next to the extras.
+        assert!(encoded["proxy_mode"].is_string());
+        assert!(encoded["proxy_list_direction"].is_string());
+        assert!(encoded["proxy_list_models"].is_array());
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn forward_logs_handler_exposes_route_labels() {
+        let dir = temp_data_dir("logs-route-api");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let mut labeled = forward_log_for("a1");
+        labeled.model = "gpt-5.6-luna".into();
+        labeled.route = "proxy".into();
+        labeled.status = "success".into();
+        let mut historical = forward_log_for("a1");
+        historical.model = "glm-5.3".into();
+        // Row written before v22: the route column keeps its empty default.
+        {
+            let db = state.db.lock();
+            db.log_forward(&labeled).unwrap();
+            db.log_forward(&historical).unwrap();
+        }
+
+        let Json(page) = forward_logs(
+            State(state.clone()),
+            Query(ForwardLogQuery {
+                limit: Some(10),
+                offset: None,
+                status: None,
+                account_id: None,
+                model: None,
+                request_id: None,
+                key_id: None,
+                start_time: None,
+                end_time: None,
+                sort_by: None,
+                sort_order: None,
+            }),
+        )
+        .await
+        .expect("logs page should load");
+        let encoded = serde_json::to_value(&page).unwrap();
+        let items = encoded["items"].as_array().unwrap();
+        let luna = items
+            .iter()
+            .find(|row| row["model"] == "gpt-5.6-luna")
+            .unwrap();
+        assert_eq!(luna["route"], "proxy");
+        let historical = items.iter().find(|row| row["model"] == "glm-5.3").unwrap();
+        assert_eq!(historical["route"], "");
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn forward_log_for(account_id: &str) -> ForwardLog {
+        ForwardLog {
+            id: 0,
+            timestamp: Utc::now(),
+            model: "test".into(),
+            account_id: account_id.into(),
+            account_name: account_id.into(),
+            client_key_id: None,
+            client_key_name: None,
+            status: "success".into(),
+            http_status: Some(200),
+            route: String::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.0),
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "legacy_estimate".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_test_list_mode_follows_direction_default_leg() {
+        let dir = temp_data_dir("proxy-test-list");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+
+        // Whitelist default leg connects directly to the reachable upstream.
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::OK, "direct leg").await;
+        let direct = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::List,
+                proxy_url: "http://127.0.0.1:7890".to_string(),
+                proxy_list_direction: Some(ProxyListDirection::Whitelist),
+                upstream_base_url: format!("http://{address}"),
+            }),
+        )
+        .await
+        .expect("whitelist default leg must connect directly");
+        assert_eq!(direct.status, StatusCode::OK.as_u16());
+        upstream.await.unwrap();
+
+        // Blacklist default leg routes through the (dead) proxy URL instead of
+        // the reachable upstream.
+        let closed_proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_proxy_address = closed_proxy.local_addr().unwrap();
+        drop(closed_proxy);
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::OK, "must stay direct-free").await;
+        let error = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::List,
+                proxy_url: format!("http://{closed_proxy_address}"),
+                proxy_list_direction: Some(ProxyListDirection::Blacklist),
+                upstream_base_url: format!("http://{address}"),
+            }),
+        )
+        .await
+        .expect_err("blacklist default leg must route through the proxy URL");
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        upstream.abort();
+
+        // Missing direction falls back to the direction persisted in config.
+        let mut persisted = state.config();
+        persisted.proxy_list_direction = ProxyListDirection::Blacklist;
+        persisted.proxy_url = format!("http://{closed_proxy_address}");
+        state.set_config(persisted).unwrap();
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::OK, "default direction").await;
+        let error = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::List,
+                proxy_url: format!("http://{closed_proxy_address}"),
+                proxy_list_direction: None,
+                upstream_base_url: format!("http://{address}"),
+            }),
+        )
+        .await
+        .expect_err("omitted direction must adopt the persisted blacklist");
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        upstream.abort();
+
+        // Empty URL is a 400 regardless of direction (list is manual-like).
+        let error = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::List,
+                proxy_url: String::new(),
+                proxy_list_direction: Some(ProxyListDirection::Whitelist),
+                upstream_base_url: "https://opencode.ai/zen/go".to_string(),
+            }),
+        )
+        .await
+        .expect_err("empty URL must be rejected before any connection");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
         drop(state);
         fs::remove_dir_all(dir).unwrap();
     }

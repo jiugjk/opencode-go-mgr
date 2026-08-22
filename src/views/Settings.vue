@@ -18,7 +18,7 @@
         <section class="settings-subsection proxy-settings" aria-labelledby="proxy-title">
           <h3 id="proxy-title">{{ t("出站代理") }}</h3>
           <p class="field-caption routing-intro">
-            {{ t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。") }}
+            {{ proxyIntro }}
           </p>
           <n-radio-group
             v-model:value="config.proxy_mode"
@@ -29,10 +29,11 @@
             <n-radio value="auto">{{ t("自动（系统 / 环境）") }}</n-radio>
             <n-radio value="manual">{{ t("手动 HTTP 代理") }}</n-radio>
             <n-radio value="direct">{{ t("强制直连") }}</n-radio>
+            <n-radio value="list">{{ t("按模型名单") }}</n-radio>
           </n-radio-group>
           <p class="field-caption proxy-mode-help">{{ proxyModeHelp }}</p>
           <n-form-item
-            v-if="config.proxy_mode === 'manual'"
+            v-if="config.proxy_mode === 'manual' || config.proxy_mode === 'list'"
             :label="t('代理地址')"
             :show-feedback="true"
             :validation-status="proxyUrlPreview.status"
@@ -48,6 +49,48 @@
               @blur="normalizeProxyInput"
             />
           </n-form-item>
+          <template v-if="config.proxy_mode === 'list'">
+            <n-form-item :label="t('名单方向')">
+              <n-radio-group
+                v-model:value="config.proxy_list_direction"
+                name="proxy-list-direction"
+                class="proxy-direction-group"
+                :disabled="!loaded || saving || testingProxy"
+              >
+                <n-radio value="whitelist">{{ t("白名单（名单内走代理）") }}</n-radio>
+                <n-radio value="blacklist">{{ t("黑名单（名单内直连）") }}</n-radio>
+              </n-radio-group>
+            </n-form-item>
+            <p class="field-caption proxy-direction-help">{{ proxyDirectionHelp }}</p>
+            <n-form-item :label="t('名单内模型')">
+              <div class="proxy-model-grid" role="group" :aria-label="t('名单内模型')">
+                <label
+                  v-for="model in config.proxy_supported_models"
+                  :key="model.id"
+                  class="proxy-model-option"
+                  :class="{ 'proxy-model-free': isZenFreeModel(model.id) }"
+                >
+                  <n-checkbox
+                    :checked="config.proxy_list_models.includes(model.id)"
+                    :disabled="!loaded || saving || testingProxy"
+                    @update:checked="(checked: boolean) => toggleProxyListModel(model.id, checked)"
+                  >
+                    {{ model.id }}
+                  </n-checkbox>
+                  <span class="proxy-model-hint">{{ protocolLabel(model.preferred_protocol) }}</span>
+                  <span v-if="isZenFreeModel(model.id)" class="proxy-model-free-hint">
+                    {{ t("Zen free 额度按出口 IP 共享，走代理会改变额度归属") }}
+                  </span>
+                </label>
+              </div>
+            </n-form-item>
+            <n-alert
+              v-if="proxyUnknownModels.length > 0"
+              type="warning"
+              class="proxy-stale-note"
+              :title="t('存储名单包含未知模型')"
+            >{{ t("保存时将被忽略：{ids}", { ids: proxyUnknownModels.join("、") }) }}</n-alert>
+          </template>
           <div class="proxy-test-row">
             <n-button
               secondary
@@ -55,7 +98,7 @@
               :disabled="!loaded || saving || proxyUrlPreview.status === 'error'"
               @click="testProxyConnection"
             >{{ t("测试连接") }}</n-button>
-            <span class="field-caption">{{ t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。") }}</span>
+            <span class="field-caption">{{ proxyTestHelp }}</span>
           </div>
           <n-alert
             v-if="proxyTestResult"
@@ -438,6 +481,7 @@ import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NForm,
   NFormItem,
   NIcon,
@@ -475,7 +519,7 @@ import {
 } from "./dashboard-connection";
 import { DEFAULT_OPENCODE_INVITE_URL, normalizeOpenCodeInviteUrl } from "./managed-account";
 import { mergeUnsavedSettings } from "./settings-merge";
-import { normalizeProxyUrl } from "./settings-proxy";
+import { normalizeProxyUrl, validateProxyList } from "./settings-proxy";
 import {
   clearUpdateTarget,
   decideInstallRequestFailure,
@@ -529,6 +573,9 @@ const config = ref<AppConfig>({
   upstream_base_url: "https://opencode.ai/zen/go",
   proxy_mode: "auto",
   proxy_url: "",
+  proxy_list_direction: "whitelist",
+  proxy_list_models: [],
+  proxy_supported_models: [],
   opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL,
   client_root_url: "",
   client_root_url_from_env: false,
@@ -552,7 +599,7 @@ const freeModelRoutingOptions: Array<{
   {
     value: "deny",
     label: "禁止 Free 模型",
-    behavior: "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。",
+    behavior: "拒绝已登记的 Zen free 模型（如 big-pickle），不拦截 Go 上名字带 free 的模型（如 ox-alpha-free），也不把 Go 模型改写到 Zen。",
   },
   {
     value: "explicit",
@@ -607,15 +654,69 @@ const proxyModeHelp = computed(() => {
     auto: "自动读取 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY；Windows 也会读取系统代理，未配置时直连。",
     manual: "所有 HTTP 与 HTTPS 目标都走此代理；代理不可用时直接报错，不会静默回退直连。",
     direct: "忽略系统代理和代理环境变量，始终直接连接。",
+    list: "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。",
   };
   return t(help[config.value.proxy_mode]);
 });
+
+const proxyIntro = computed(() => (
+  config.value.proxy_mode === "list"
+    ? t("名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。")
+    : t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。")
+));
+
+const proxyTestHelp = computed(() => (
+  config.value.proxy_mode === "list"
+    ? t("测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。")
+    : t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。")
+));
+
+const proxyDirectionHelp = computed(() => (
+  config.value.proxy_list_direction === "whitelist"
+    ? t("名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。")
+    : t("名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。")
+));
+
+const proxySupportedIds = computed(() =>
+  config.value.proxy_supported_models.map((model) => model.id),
+);
+
+/** Stored ids the current registry no longer knows; inert and dropped on save. */
+const proxyUnknownModels = computed(() => (
+  config.value.proxy_mode === "list"
+    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.includes(id))
+    : []
+));
+
+/** On the registered Zen free channel (egress-IP-shared quota). Go catalog
+ * ids may end in `-free` without being on the free channel, so the hint must
+ * follow the registry flag, not the suffix. */
+function isZenFreeModel(id: string): boolean {
+  return config.value.proxy_supported_models.some((model) => model.id === id && model.zen_free);
+}
+
+function protocolLabel(protocol: string): string {
+  if (protocol === "chat_completions") return "Chat";
+  if (protocol === "messages") return "Messages";
+  if (protocol === "gemini") return "Gemini";
+  return "Responses";
+}
+
+function toggleProxyListModel(id: string, checked: boolean) {
+  const models = new Set(config.value.proxy_list_models);
+  if (checked) {
+    models.add(id);
+  } else {
+    models.delete(id);
+  }
+  config.value.proxy_list_models = [...models];
+}
 
 const proxyUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
   try {
     normalizeProxyUrl(config.value.proxy_mode, config.value.proxy_url);
     return {
-      feedback: config.value.proxy_mode === "manual"
+      feedback: config.value.proxy_mode === "manual" || config.value.proxy_mode === "list"
         ? t("支持 http:// 或 https:// 代理地址，不支持在 URL 中保存用户名和密码。")
         : "",
     };
@@ -628,7 +729,13 @@ const proxyUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
 });
 
 watch(
-  () => [config.value.proxy_mode, config.value.proxy_url, config.value.upstream_base_url],
+  () => [
+    config.value.proxy_mode,
+    config.value.proxy_url,
+    config.value.proxy_list_direction,
+    config.value.proxy_list_models,
+    config.value.upstream_base_url,
+  ],
   () => { proxyTestResult.value = null; },
 );
 
@@ -789,6 +896,7 @@ async function saveSettings() {
   if (!normalizeClientRootInput()) return;
   if (!normalizeInviteUrlInput()) return;
   if (!normalizeProxyInput()) return;
+  if (!normalizeProxyListInput()) return;
   if (!validateTimeouts()) return;
   saving.value = true;
   const payload = { ...config.value };
@@ -823,11 +931,29 @@ function normalizeProxyInput(): boolean {
   }
 }
 
+/** Pre-save list validation: stale stored ids are dropped (never rendered by
+ * the checkbox grid), then the non-empty rule is enforced like the API. */
+function normalizeProxyListInput(): boolean {
+  if (config.value.proxy_mode !== "list") return true;
+  const supported = proxySupportedIds.value;
+  const knownOnly = config.value.proxy_list_models
+    .map((id) => id.trim())
+    .filter((id) => supported.includes(id));
+  try {
+    config.value.proxy_list_models = validateProxyList(config.value.proxy_mode, knownOnly, supported);
+    return true;
+  } catch (error) {
+    message.error(error instanceof Error ? t(error.message as MessageKey) : t("代理地址格式无效"));
+    return false;
+  }
+}
+
 async function testProxyConnection() {
   if (!loaded.value || testingProxy.value || !normalizeProxyInput()) return;
   const request = {
     proxy_mode: config.value.proxy_mode,
     proxy_url: config.value.proxy_url,
+    proxy_list_direction: config.value.proxy_list_direction,
     upstream_base_url: config.value.upstream_base_url,
   };
   testingProxy.value = true;
@@ -837,6 +963,7 @@ async function testProxyConnection() {
     if (
       config.value.proxy_mode !== request.proxy_mode
       || config.value.proxy_url !== request.proxy_url
+      || config.value.proxy_list_direction !== request.proxy_list_direction
       || config.value.upstream_base_url !== request.upstream_base_url
     ) {
       return;
@@ -853,6 +980,7 @@ async function testProxyConnection() {
     if (
       config.value.proxy_mode !== request.proxy_mode
       || config.value.proxy_url !== request.proxy_url
+      || config.value.proxy_list_direction !== request.proxy_list_direction
       || config.value.upstream_base_url !== request.upstream_base_url
     ) {
       return;
@@ -1302,6 +1430,36 @@ onUnmounted(() => {
 }
 .proxy-test-result {
   margin-top: 12px;
+}
+.proxy-direction-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+.proxy-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 6px 16px;
+  width: 100%;
+}
+.proxy-model-option {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+.proxy-model-hint {
+  color: var(--n-text-color-disabled, inherit);
+  font-size: 12px;
+}
+.proxy-model-free-hint {
+  flex-basis: 100%;
+  padding-left: 24px;
+  color: var(--n-text-color-warning, inherit);
+  font-size: 12px;
+}
+.proxy-stale-note {
+  margin-top: 8px;
 }
 .settings-load-error {
   display: flex;

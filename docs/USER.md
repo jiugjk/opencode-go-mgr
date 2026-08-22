@@ -612,9 +612,12 @@ if any, and the streamed usage when the upstream emitted a usage chunk.
 - Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
   upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
   still finished without one. A usage chunk makes token counts accurate; quota
-  use is still estimated from the active OpenCode Go pricing snapshot. Zen free
-  models (`*-free`, `big-pickle`) record tokens with `cost_state=free` and do
-  not enter Go quota totals. Expand a row to see the request ID and diagnostic
+  use is still estimated from the active OpenCode Go pricing snapshot. Registered
+  Zen free models (`big-pickle`, `mimo-v2.5-free`, and other ids on the Zen
+  allowlist) record tokens with `cost_state=free` and do not enter Go quota
+  totals. Go models whose names contain `free` (currently `ox-alpha-free`) stay
+  on Go and are unpriced while the official table lists dash rates. Expand a row
+  to see the request ID and diagnostic
   detail.
 - An `outcome_unknown` row means the upstream may already have completed and
   charged the request, but the gateway lost the response or timed out. Such a
@@ -632,19 +635,46 @@ The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Upstream URL** — the OpenCode-Go base URL.
-- **Outbound proxy** — a process-wide setting shared by every account.
-  `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
-  `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
-  directly when none is configured. `Manual HTTP proxy` strictly routes all
-  HTTP/HTTPS targets through one `http://` or `https://` proxy such as
-  `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
-  connection. `Force direct connection` ignores system and environment proxy
-  configuration. Proxy URLs cannot contain credentials. The policy covers core
-  HTTP requests including model forwarding, account-key tests, model listing,
-  official OpenCode Go usage API, pricing refreshes, release checks, and signed desktop
-  installer downloads; the browser sidecar is outside its scope. **Test connection** uses the unsaved form values
-  against the current upstream. Any HTTP status proves network reachability,
-  without running model inference or incurring model usage.
+- **Outbound proxy** — shared by every account. Automatic, manual, and force
+  direct apply one process-wide policy; **Per-model list** (below) splits chat
+  forwarding by model instead. `Automatic (system / environment)` reads
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`; Windows also reads
+  the system proxy and connects directly when none is configured. `Manual HTTP
+  proxy` strictly routes all HTTP/HTTPS targets through one `http://` or
+  `https://` proxy such as `http://127.0.0.1:7890`; a proxy failure never
+  silently falls back to a direct connection. `Force direct connection` ignores
+  system and environment proxy configuration. Proxy URLs cannot contain
+  credentials. For the three process-wide modes, the policy covers core HTTP
+  requests including model forwarding, account-key tests, model listing,
+  official OpenCode Go usage API, pricing refreshes, release checks, and signed
+  desktop installer downloads; the browser sidecar is outside its scope.
+  **Test connection** uses the unsaved form values against the current
+  upstream. Any HTTP status proves network reachability, without running model
+  inference or incurring model usage. In list mode it probes only the
+  direction's default leg, not a listed model's real forwarding path.
+- **Per-model list** (fourth proxy mode) — routes chat forwarding per model
+  instead of process-wide. Pick a direction and check models from the known
+  registry; the list accepts exact known model ids only (no patterns or
+  free-text). With the **whitelist** direction, listed models — for example
+  region-restricted ones such as `gpt-5.6-luna`, `grok-4.5`, or
+  `muse-spark-1.2` — connect through the proxy URL while every unlisted model
+  connects directly (ignoring system/environment proxies, exactly like force
+  direct). The **blacklist** direction inverts this: listed models connect
+  directly and everything else uses the proxy URL. Both directions require the
+  proxy URL; an empty list or an empty URL cannot be saved. Non-chat outbound
+  traffic (pricing refreshes, official usage sync, update checks, and signed
+  downloads) always follows the direction's default leg: direct for a
+  whitelist, the proxy URL for a blacklist — so switching from `Manual HTTP
+  proxy` to a whitelist changes that traffic to direct. The account-key test
+  and **Test connection** likewise probe the default leg, so they do not
+  represent the real forwarding path of a listed model. Free-channel models
+  can be listed, but Zen free quota is shared by egress IP, so routing them
+  through a proxy changes which quota they draw from. Every forward-log row
+  (successes included) records the leg it used — `proxy`, `direct`, or `auto`
+  — in its expanded details; rows from before this feature show "not
+  recorded". List mode requires this version or newer; an older binary cannot
+  start on a config saved with `list` mode — switch back to manual or direct
+  mode first when rolling back.
 - **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
   account onboarding. Fresh installs may ship a demo default; replace it with
   your own link before a real signup. Creating a managed draft can also edit
@@ -740,8 +770,8 @@ Chat; `glm-5.3` is Chat-only.
 
 | Preferred upstream | Models |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
-| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free`, `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`, `laguna-s-2.1-free` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.2-contributor-free` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
 Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
@@ -750,9 +780,9 @@ Source of truth: `MODEL_PROTOCOLS` in
 `crates/ocg-core/src/gateway/protocol.rs`.
 
 `reasoning.effort` aliases (applied before forwarding or conversion):
-`muse-spark-1.2` and `muse-spark-1.2-contributor` map `max` → `xhigh`
-(upstream rejects `max`). Other models pass `reasoning.effort` through
-unchanged.
+`muse-spark-1.2`, `muse-spark-1.2-contributor`, and
+`muse-spark-1.2-contributor-free` map `max` → `xhigh` (upstream rejects
+`max`). Other models pass `reasoning.effort` through unchanged.
 
 | Model | Preferred | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
@@ -763,7 +793,8 @@ unchanged.
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
 | `gpt-5.6-luna` | Responses | ✓ | ✓ | |
 | `muse-spark-1.2` | Responses | | ✓ | |
-| `muse-spark-1.2-contributor` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2-contributor-free` | Responses | | ✓ | |
 | `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
@@ -773,6 +804,12 @@ unchanged.
 | `mimo-v2.5` | Chat | ✓ | | |
 | `mimo-v2.5-pro` | Chat | ✓ | | |
 | `hy3` | Chat | ✓ | | |
+| `ox-alpha-free` | Chat | ✓ | | |
+| `big-pickle` | Chat | ✓ | | |
+| `mimo-v2.5-free` | Chat | ✓ | | |
+| `hy3-free` | Chat | ✓ | | |
+| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `laguna-s-2.1-free` | Chat | ✓ | | |
 | `minimax-m3` | Messages | ✓ | | ✓ |
 | `minimax-m2.7` | Messages | ✓ | | ✓ |
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
@@ -863,10 +900,14 @@ from the Accounts view. The selector skips:
   `429`).
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
-the gateway tries the next account. `401` and `403` responses fail over
-without writing a cooldown — they are an authentication problem, not a quota
-problem. A DNS/TCP/TLS connection failure that proves the request was not
-sent is retried once on the same account, including for streaming calls.
+the gateway tries the next account. `403` fails over without writing a
+cooldown. `401` is returned as-is and does **not** rotate accounts or persist
+`auth_error` — OpenCode Go uses 401 for both invalid keys and `ModelError`
+("model is not supported"), so treating it as a key breaker would interrupt
+the client and strand a valid account. Dashboard **Ping** / key verification
+still record `auth_error` when they get a 401. A DNS/TCP/TLS connection
+failure that proves the request was not sent is retried once on the same
+account, including for streaming calls.
 
 The gateway does not replay `408`, `5xx`, post-connect transport failures,
 response-body timeouts, or interrupted streams. Ambiguous failures are
@@ -946,9 +987,23 @@ Settings expose three OpenCode Zen free-routing modes:
 
 | Mode | Behavior |
 | --- | --- |
-| **Deny free models** | Reject `*-free` / `big-pickle` and never rewrite Go models onto free |
-| **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
-| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted (IP-shared 429, no key rotation) fall back to Go |
+| **Deny free models** | Reject registered Zen free models (`big-pickle`, `mimo-v2.5-free`, …) and never rewrite Go models onto Zen. Go ids that merely contain `free`, such as `ox-alpha-free`, stay on Go. |
+| **Explicit free only** (default) | Only client-requested Zen free models use `https://opencode.ai/zen`; Go models stay on Go |
+| **Prefer mapped free models** | Current map: `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted (IP-shared 429, no key rotation) fall back to Go |
+
+Zen free routing is an explicit allowlist (`big-pickle` plus registered Zen
+promo ids). A `-free` suffix is not enough: official Go docs list
+`ox-alpha-free` (Ox Alpha Free) on
+`https://opencode.ai/zen/go/v1/chat/completions`, so that model stays on Go.
+When free routing is not deny, `GET /v1/models` merges the known live Zen free
+ids into the Go catalog so clients can discover them.
+
+Live-verified Zen free set (2026-08-21, no key required on Zen):
+`big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`,
+`laguna-s-2.1-free` (Chat), and `muse-spark-1.2-contributor-free` (Responses;
+`max_output_tokens` must be at least 16). `deepseek-v4-flash-free` now returns
+unavailable. Official docs still list `nemotron-3.5-lightning-free`, but a live
+ping from this workspace did not complete.
 
 Free and Go cooldowns are **independent**. Zen free promo quota is shared per
 egress IP, so a free `429` cools the whole free channel and does **not** rotate
@@ -1023,7 +1078,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.8.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.8.2 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -1039,7 +1094,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.1`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.2`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -1186,13 +1241,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.2 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -1308,10 +1363,12 @@ and browser profiles.
   source development only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
-- **`401 Unauthorized` from the upstream.** The OpenCode-Go account key is
-  invalid or revoked. Open the **Accounts** view, replace the key, and try
-  again. `key ping <id>` is the fastest way to confirm. The account is marked
-  as an authentication failure and leaves rotation; that breaker lifts
+- **`401 Unauthorized` from the upstream.** The gateway returns that status
+  to the client and does not rotate accounts. OpenCode Go also uses 401 for
+  `ModelError` when the model is not on that product. Use **Ping** in the
+  **Accounts** view (or `key ping <id>`) to check whether the Key itself is
+  invalid. When the key is indeed invalid, the account is marked as an
+  authentication failure and leaves rotation; that breaker lifts
   automatically once an official usage sync succeeds with headroom left in
   all three windows — 5-hour, weekly, and monthly (any exhausted window keeps
   it benched). Manual **Refresh quota** and **Refresh all accounts** use the

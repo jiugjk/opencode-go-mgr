@@ -355,6 +355,22 @@ pub enum ProxyMode {
     Manual,
     /// Ignore platform/environment proxy configuration and connect directly.
     Direct,
+    /// Route per model against `proxy_list_models`: listed models use the
+    /// direction's exception leg, everything else (including non-model-scoped
+    /// outbound traffic) uses the direction's default leg.
+    List,
+}
+
+/// Which leg the listed models take in list proxy mode. The other leg is the
+/// direction's default for unlisted models and non-model-scoped traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyListDirection {
+    /// Listed models go through `proxy_url`; everything else connects directly.
+    #[default]
+    Whitelist,
+    /// Listed models connect directly; everything else goes through `proxy_url`.
+    Blacklist,
 }
 
 pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=55G3ETNT1Q";
@@ -375,6 +391,10 @@ pub struct AppConfig {
     pub upstream_base_url: String,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_list_direction: ProxyListDirection,
+    #[serde(default)]
+    pub proxy_list_models: Vec<String>,
     pub opencode_invite_url: String,
     pub client_root_url: String,
     pub auto_start: bool,
@@ -397,6 +417,8 @@ impl Default for AppConfig {
             upstream_base_url: "https://opencode.ai/zen/go".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: String::new(),
+            proxy_list_direction: ProxyListDirection::Whitelist,
+            proxy_list_models: Vec::new(),
             opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL.to_string(),
             client_root_url: String::new(),
             auto_start: false,
@@ -590,11 +612,18 @@ impl AppConfig {
 }
 
 /// Validates and canonicalizes the optional global outbound HTTP proxy URL.
+///
+/// Manual and list modes both require a usable URL (the list legs route
+/// through it); unused leftover values must not block Auto/Direct saves.
 pub fn normalize_proxy_url(mode: ProxyMode, value: &str) -> Result<String, String> {
     let value = value.trim();
+    let url_required = matches!(mode, ProxyMode::Manual | ProxyMode::List);
     if value.is_empty() {
-        return if mode == ProxyMode::Manual {
-            Err("manual proxy mode requires a proxy URL".to_string())
+        return if url_required {
+            Err(match mode {
+                ProxyMode::List => "list proxy mode requires a proxy URL".to_string(),
+                _ => "manual proxy mode requires a proxy URL".to_string(),
+            })
         } else {
             Ok(String::new())
         };
@@ -602,7 +631,7 @@ pub fn normalize_proxy_url(mode: ProxyMode, value: &str) -> Result<String, Strin
 
     match canonicalize_proxy_url(value) {
         Ok(normalized) => Ok(normalized),
-        Err(error) if mode == ProxyMode::Manual => Err(error),
+        Err(error) if url_required => Err(error),
         // Unused leftover values must not block Auto/Direct saves.
         Err(_) => Ok(value.to_string()),
     }
@@ -687,6 +716,10 @@ pub struct ForwardLog {
     pub client_key_name: Option<String>,
     pub status: String,
     pub http_status: Option<i32>,
+    /// Route leg label for this attempt: `auto`, `proxy`, or `direct`.
+    /// Empty for rows written before the column existed ("not recorded").
+    #[serde(default)]
+    pub route: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub cached_tokens: i64,
@@ -869,9 +902,9 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, MAX_ACCOUNT_NOTES_CHARS, ProxyMode, RoutingMode, normalize_account_notes,
-        normalize_opencode_invite_url, normalize_proxy_url, normalize_purchase_date,
-        purchase_expires_on,
+        FreeModelRouting, MAX_ACCOUNT_NOTES_CHARS, ProxyListDirection, ProxyMode, RoutingMode,
+        normalize_account_notes, normalize_opencode_invite_url, normalize_proxy_url,
+        normalize_purchase_date, purchase_expires_on,
     };
 
     #[test]
@@ -1108,6 +1141,139 @@ mod tests {
         }
         .validate()
         .expect("auto mode must not reject leftover invalid proxy URLs");
+    }
+
+    #[test]
+    fn list_proxy_mode_requires_a_valid_proxy_url_but_not_a_valid_list() {
+        let mut config = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: String::new(),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "list proxy mode requires a proxy URL"
+        );
+        config.proxy_url = "http://127.0.0.1:7890".to_string();
+        // validate() must stay self-contained: an empty list or unknown ids are
+        // write-gate concerns and must never block the load path.
+        config.proxy_list_models = Vec::new();
+        config
+            .validate()
+            .expect("empty list must not block validate");
+        config.proxy_list_models = vec!["not-a-known-model".to_string()];
+        config
+            .validate()
+            .expect("unknown list ids must not block validate");
+
+        assert!(normalize_proxy_url(ProxyMode::List, "socks5://127.0.0.1:1080").is_err());
+    }
+
+    #[test]
+    fn non_list_modes_keep_list_fields_untouched() {
+        let config = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_list_direction: ProxyListDirection::Blacklist,
+            proxy_list_models: vec!["gpt-5.6-luna".to_string(), "grok-4.5".to_string()],
+            ..AppConfig::default()
+        };
+        config
+            .validate()
+            .expect("auto mode with list leftovers passes");
+        assert_eq!(config.proxy_list_direction, ProxyListDirection::Blacklist);
+        assert_eq!(config.proxy_list_models.len(), 2);
+    }
+
+    #[test]
+    fn proxy_mode_and_direction_serde_round_trip() {
+        assert_eq!(
+            serde_json::to_value(ProxyMode::List).unwrap(),
+            serde_json::json!("list")
+        );
+        assert_eq!(
+            serde_json::to_value(ProxyListDirection::Blacklist).unwrap(),
+            serde_json::json!("blacklist")
+        );
+        assert_eq!(
+            serde_json::from_value::<ProxyListDirection>(serde_json::json!("whitelist")).unwrap(),
+            ProxyListDirection::Whitelist
+        );
+    }
+
+    #[test]
+    fn legacy_config_without_list_fields_loads_with_defaults() {
+        let legacy = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-keep",
+            "upstream_base_url": "https://opencode.ai/zen/go",
+            "proxy_mode": "manual",
+            "proxy_url": "http://127.0.0.1:7890",
+            "opencode_invite_url": DEFAULT_OPENCODE_INVITE_URL,
+            "client_root_url": "",
+            "auto_start": false,
+            "show_dock_icon": true,
+            "connect_timeout_secs": 30,
+            "non_stream_timeout_secs": 900,
+            "stream_idle_timeout_secs": 300,
+            "routing_mode": "strict-priority",
+            "conversation_sticky": false,
+            "free_model_routing": "explicit",
+            "claude_desktop_models": {
+                "sonnet": "minimax-m3",
+                "opus": "",
+                "haiku": ""
+            }
+        });
+        let config: AppConfig = serde_json::from_value(legacy).expect("legacy config loads");
+        assert_eq!(config.proxy_list_direction, ProxyListDirection::Whitelist);
+        assert!(config.proxy_list_models.is_empty());
+        for mode in [ProxyMode::Auto, ProxyMode::Manual, ProxyMode::Direct] {
+            let mut legacy_config = config.clone();
+            legacy_config.proxy_mode = mode;
+            legacy_config
+                .validate()
+                .expect("legacy three-mode behavior is unchanged");
+        }
+    }
+
+    #[test]
+    fn list_mode_deserialization_fails_loudly_without_serde_other() {
+        // D8: no #[serde(other)] fallback — an older binary must fail to start
+        // on a "list" config instead of silently routing restricted models
+        // directly.
+        let encoded = serde_json::json!("list");
+        // This build knows the variant, so it decodes; the fail-loud contract
+        // is about older builds lacking it, asserted via raw JSON round trip.
+        assert_eq!(
+            serde_json::from_value::<ProxyMode>(encoded).unwrap(),
+            ProxyMode::List
+        );
+        assert!(serde_json::from_value::<ProxyMode>(serde_json::json!("unknown-mode")).is_err());
+    }
+
+    #[test]
+    fn persisted_list_with_stale_ids_loads_and_never_matches() {
+        // Registry-shrink tolerance: the load path only needs a URL; stale ids
+        // and empty lists resolve to "no match" inside the route set (covered
+        // by http_client tests), never to a startup failure.
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "gateway_key": "k",
+            "proxy_mode": "list",
+            "proxy_url": "http://127.0.0.1:7890",
+            "proxy_list_direction": "whitelist",
+            "proxy_list_models": ["gpt-5.6-luna", "removed-model"],
+            "claude_desktop_models": { "sonnet": "minimax-m3", "opus": "", "haiku": "" }
+        }))
+        .expect("stale list entries must load");
+        config
+            .validate()
+            .expect("validate only checks the self-contained URL invariant");
+        assert!(
+            config
+                .proxy_list_models
+                .contains(&"removed-model".to_string())
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use ocg_core::models::{AppConfig, ProxyMode};
+use ocg_core::models::{AppConfig, ProxyListDirection, ProxyMode};
 use ocg_core::state::CoreState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -125,6 +125,12 @@ fn updater_proxy_setting(config: &AppConfig) -> UpdaterProxySetting {
         ProxyMode::Auto => UpdaterProxySetting::FollowSystem,
         ProxyMode::Manual => UpdaterProxySetting::Manual(config.proxy_url.clone()),
         ProxyMode::Direct => UpdaterProxySetting::Disabled,
+        // Signed downloads are non-model-scoped traffic: they follow the
+        // direction's default leg, matching `configured_builder`.
+        ProxyMode::List => match config.proxy_list_direction {
+            ProxyListDirection::Whitelist => UpdaterProxySetting::Disabled,
+            ProxyListDirection::Blacklist => UpdaterProxySetting::Manual(config.proxy_url.clone()),
+        },
     }
 }
 
@@ -153,7 +159,7 @@ fn normalize_public_key(value: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{UpdaterProxySetting, normalize_public_key, updater_proxy_setting};
-    use ocg_core::models::{AppConfig, ProxyMode};
+    use ocg_core::models::{AppConfig, ProxyListDirection, ProxyMode};
 
     #[test]
     fn updater_public_key_must_be_non_empty() {
@@ -184,6 +190,30 @@ mod tests {
         assert_eq!(
             updater_proxy_setting(&config),
             UpdaterProxySetting::Manual("http://127.0.0.1:7890".to_string())
+        );
+    }
+
+    #[test]
+    fn updater_follows_the_list_mode_default_leg_per_direction() {
+        let mut config = AppConfig {
+            gateway_key: "k".to_string(),
+            proxy_mode: ProxyMode::List,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            ..AppConfig::default()
+        };
+
+        config.proxy_list_direction = ProxyListDirection::Whitelist;
+        assert_eq!(
+            updater_proxy_setting(&config),
+            UpdaterProxySetting::Disabled,
+            "whitelist default leg is direct"
+        );
+
+        config.proxy_list_direction = ProxyListDirection::Blacklist;
+        assert_eq!(
+            updater_proxy_setting(&config),
+            UpdaterProxySetting::Manual("http://127.0.0.1:7890".to_string()),
+            "blacklist default leg is the manual proxy"
         );
     }
 }

@@ -249,6 +249,7 @@ mod tests {
             client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,

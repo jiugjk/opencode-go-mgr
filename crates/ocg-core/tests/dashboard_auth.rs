@@ -961,6 +961,7 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
                 client_key_name: None,
                 status: "success".into(),
                 http_status: Some(200),
+                route: String::new(),
                 prompt_tokens,
                 completion_tokens: prompt_tokens * 2,
                 cached_tokens: 0,

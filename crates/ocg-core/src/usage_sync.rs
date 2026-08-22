@@ -1288,7 +1288,7 @@ mod tests {
             assert_eq!(sync.failure_streak, 0);
             assert_eq!(sync.last_expedited_at, Some(now));
             // Defaults after migration: missing rows still open.
-            assert_eq!(db.schema_version().unwrap(), 21);
+            assert_eq!(db.schema_version().unwrap(), 22);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1344,6 +1344,7 @@ mod tests {
                 client_key_name: None,
                 status: "success".into(),
                 http_status: Some(200),
+                route: String::new(),
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 cached_tokens: 0,
@@ -1795,6 +1796,7 @@ mod tests {
                 client_key_name: None,
                 status: "success".into(),
                 http_status: Some(200),
+                route: String::new(),
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 cached_tokens: 0,

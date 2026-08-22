@@ -1114,6 +1114,8 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /proxy_mode: "auto"/);
   assert.match(settings, /v-model:value="config\.proxy_mode"/);
   assert.match(settings, /v-model:value="config\.proxy_url"/);
+  assert.match(settings, /\{\{ proxyIntro \}\}/);
+  assert.match(settings, /\{\{ proxyTestHelp \}\}/);
   assert.match(settings, /tauriApi\.testProxy/);
   assert.match(api, /request<ProxyTestResult>\("\/settings\/test-proxy"/);
   assert.match(settingsMerge, /"proxy_mode"[\s\S]*"proxy_url"/);

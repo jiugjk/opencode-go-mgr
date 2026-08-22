@@ -4,7 +4,7 @@ use crate::gateway::protocol::ApiFormat;
 use crate::models::{FreeModelRouting, UpstreamChannel};
 use crate::pricing::normalize_model_name;
 use bytes::Bytes;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Default free-usage cooldown when upstream omits a reset hint.
 pub const DEFAULT_FREE_COOLDOWN_MINUTES: i64 = 30;
@@ -22,45 +22,42 @@ const FREE_MODELS: &[FreeModelProfile] = &[
         context_tokens: 200_000,
     },
     FreeModelProfile {
-        id: "deepseek-v4-flash-free",
-        context_tokens: 200_000,
-    },
-    FreeModelProfile {
         id: "mimo-v2.5-free",
         context_tokens: 200_000,
     },
     FreeModelProfile {
-        id: "ling-3.0-flash-free",
-        context_tokens: 262_144,
+        id: "hy3-free",
+        context_tokens: 256_000,
     },
     FreeModelProfile {
         id: "laguna-s-2.1-free",
         context_tokens: 256_000,
     },
     FreeModelProfile {
-        id: "longcat-2.0-free",
-        context_tokens: 1_000_000,
-    },
-    FreeModelProfile {
-        id: "north-mini-code-free",
-        context_tokens: 256_000,
-    },
-    FreeModelProfile {
         id: "nemotron-3-ultra-free",
         context_tokens: 1_000_000,
+    },
+    FreeModelProfile {
+        id: "nemotron-3.5-lightning-free",
+        context_tokens: 1_000_000,
+    },
+    FreeModelProfile {
+        id: "muse-spark-1.2-contributor-free",
+        context_tokens: 1_048_576,
     },
 ];
 
 /// Go model id -> free twin id (prefer mode only).
-const FREE_MAPPINGS: &[(&str, &str)] = &[
-    ("deepseek-v4-flash", "deepseek-v4-flash-free"),
-    ("mimo-v2.5", "mimo-v2.5-free"),
-];
+const FREE_MAPPINGS: &[(&str, &str)] = &[("mimo-v2.5", "mimo-v2.5-free")];
 
 const CONTEXT_SAFETY_RATIO: f64 = 0.9;
 /// Reserved headroom so short output still fits inside the free window.
 const CONTEXT_OUTPUT_RESERVE: u64 = 4_096;
 
+/// True only for registered OpenCode Zen promo models.
+///
+/// Go catalog ids can contain `free` (currently `ox-alpha-free` / Ox Alpha Free)
+/// and still use `/zen/go`. Do not treat a `-free` suffix as Zen.
 pub fn is_free_model(model: &str) -> bool {
     let normalized = normalize_model_name(model);
     FREE_MODELS.iter().any(|profile| profile.id == normalized)
@@ -239,6 +236,35 @@ fn count_string_chars(value: &Value) -> u64 {
     }
 }
 
+/// Append known Zen free model ids to an OpenAI-style `/v1/models` payload.
+///
+/// Go's catalog omits Zen-only promo models such as `big-pickle`. Clients that
+/// discover models from the gateway would otherwise never see them. Go-named
+/// free ids like `ox-alpha-free` already appear in the Go catalog and must not
+/// be injected as Zen.
+pub fn merge_free_models_into_list(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut value: Value =
+        serde_json::from_slice(body).map_err(|error| format!("invalid models list: {error}"))?;
+    let data = value
+        .get_mut("data")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "models list data is missing".to_string())?;
+    let existing = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<Vec<_>>();
+    for id in free_model_ids() {
+        if existing.iter().any(|have| have == id) {
+            continue;
+        }
+        data.push(json!({
+            "id": id,
+            "object": "model",
+        }));
+    }
+    serde_json::to_vec(&value).map_err(|error| format!("failed to encode models list: {error}"))
+}
+
 pub fn rewrite_body_model(body: &Bytes, model: &str) -> Result<Bytes, String> {
     let mut value: Value =
         serde_json::from_slice(body).map_err(|error| format!("invalid JSON request: {error}"))?;
@@ -259,15 +285,94 @@ mod tests {
 
     #[test]
     fn detects_free_allowlist_and_mappings() {
-        assert!(is_free_model("deepseek-v4-flash-free"));
+        assert!(is_free_model("mimo-v2.5-free"));
         assert!(is_free_model("big-pickle"));
+        assert!(is_free_model("hy3-free"));
+        assert!(!is_free_model("ox-alpha-free"));
+        assert!(!is_free_model("x-preview-f-free"));
+        assert!(!is_free_model("brand-new-promo-free"));
         assert!(!is_free_model("deepseek-v4-flash"));
-        assert_eq!(
-            mapped_free_for("deepseek-v4-flash"),
-            Some("deepseek-v4-flash-free")
-        );
+        assert_eq!(mapped_free_for("deepseek-v4-flash"), None);
         assert_eq!(mapped_free_for("mimo-v2.5"), Some("mimo-v2.5-free"));
         assert_eq!(mapped_free_for("mimo-v2.5-pro"), None);
+        assert_eq!(mapped_free_for("hy3"), None);
+    }
+
+    #[test]
+    fn go_named_free_stays_on_go() {
+        let body = Bytes::from_static(br#"{"model":"ox-alpha-free","messages":[]}"#);
+        let decision = decide_route(
+            FreeModelRouting::Explicit,
+            "ox-alpha-free",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &body,
+        )
+        .unwrap();
+        assert_eq!(decision.channel, UpstreamChannel::Go);
+        assert_eq!(decision.model, "ox-alpha-free");
+        assert!(!decision.allow_go_fallback);
+
+        let deny = decide_route(
+            FreeModelRouting::Deny,
+            "ox-alpha-free",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &body,
+        )
+        .unwrap();
+        assert_eq!(deny.channel, UpstreamChannel::Go);
+
+        let unknown_suffix = decide_route(
+            FreeModelRouting::Explicit,
+            "brand-new-promo-free",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &Bytes::from_static(br#"{"model":"brand-new-promo-free","messages":[]}"#),
+        )
+        .unwrap();
+        assert_eq!(unknown_suffix.channel, UpstreamChannel::Go);
+    }
+
+    #[test]
+    fn registered_zen_promo_routes_to_zen() {
+        let pickle = decide_route(
+            FreeModelRouting::Explicit,
+            "big-pickle",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &Bytes::from_static(br#"{"model":"big-pickle","messages":[]}"#),
+        )
+        .unwrap();
+        assert_eq!(pickle.channel, UpstreamChannel::Free);
+        assert_eq!(pickle.model, "big-pickle");
+        assert!(!pickle.allow_go_fallback);
+    }
+
+    #[test]
+    fn merge_appends_missing_free_ids() {
+        let merged = merge_free_models_into_list(
+            br#"{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model"}]}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&merged).unwrap();
+        let ids = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"deepseek-v4-flash"));
+        assert!(ids.contains(&"big-pickle"));
+        assert!(ids.contains(&"hy3-free"));
+        assert!(ids.contains(&"muse-spark-1.2-contributor-free"));
+        assert!(!ids.contains(&"ox-alpha-free"));
+        assert!(!ids.contains(&"x-preview-f-free"));
+        assert!(!ids.contains(&"deepseek-v4-flash-free"));
+        assert_eq!(
+            ids.iter().filter(|id| **id == "deepseek-v4-flash").count(),
+            1
+        );
     }
 
     #[test]
@@ -304,41 +409,41 @@ mod tests {
     fn prefer_maps_short_requests_and_keeps_long_on_go() {
         let short = Bytes::from(
             serde_json::to_vec(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "mimo-v2.5",
                 "messages": [{"role":"user","content":"hi"}]
             }))
             .unwrap(),
         );
         let decision = decide_route(
             FreeModelRouting::Prefer,
-            "deepseek-v4-flash",
+            "mimo-v2.5",
             ApiFormat::ChatCompletions,
             ApiFormat::ChatCompletions,
             &short,
         )
         .unwrap();
         assert_eq!(decision.channel, UpstreamChannel::Free);
-        assert_eq!(decision.model, "deepseek-v4-flash-free");
+        assert_eq!(decision.model, "mimo-v2.5-free");
         assert!(decision.allow_go_fallback);
 
         let long_text = "x".repeat(900_000);
         let long = Bytes::from(
             serde_json::to_vec(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "mimo-v2.5",
                 "messages": [{"role":"user","content": long_text}]
             }))
             .unwrap(),
         );
         let decision = decide_route(
             FreeModelRouting::Prefer,
-            "deepseek-v4-flash",
+            "mimo-v2.5",
             ApiFormat::ChatCompletions,
             ApiFormat::ChatCompletions,
             &long,
         )
         .unwrap();
         assert_eq!(decision.channel, UpstreamChannel::Go);
-        assert_eq!(decision.model, "deepseek-v4-flash");
+        assert_eq!(decision.model, "mimo-v2.5");
         assert!(!decision.allow_go_fallback);
     }
 
@@ -359,10 +464,10 @@ mod tests {
 
     #[test]
     fn shared_free_exhaustion_keeps_prefer_on_go() {
-        let body = Bytes::from_static(br#"{"model":"deepseek-v4-flash","messages":[]}"#);
+        let body = Bytes::from_static(br#"{"model":"mimo-v2.5","messages":[]}"#);
         let decision = decide_route(
             FreeModelRouting::Prefer,
-            "deepseek-v4-flash",
+            "mimo-v2.5",
             ApiFormat::ChatCompletions,
             ApiFormat::ChatCompletions,
             &body,
@@ -371,16 +476,16 @@ mod tests {
         assert_eq!(decision.channel, UpstreamChannel::Free);
         let exhausted = apply_shared_free_exhaustion(decision, false);
         assert_eq!(exhausted.channel, UpstreamChannel::Go);
-        assert_eq!(exhausted.model, "deepseek-v4-flash");
+        assert_eq!(exhausted.model, "mimo-v2.5");
         assert!(!exhausted.allow_go_fallback);
     }
 
     #[test]
     fn shared_free_exhaustion_does_not_rewrite_explicit_free() {
-        let body = Bytes::from_static(br#"{"model":"deepseek-v4-flash-free","messages":[]}"#);
+        let body = Bytes::from_static(br#"{"model":"mimo-v2.5-free","messages":[]}"#);
         let decision = decide_route(
             FreeModelRouting::Explicit,
-            "deepseek-v4-flash-free",
+            "mimo-v2.5-free",
             ApiFormat::ChatCompletions,
             ApiFormat::ChatCompletions,
             &body,
@@ -388,6 +493,6 @@ mod tests {
         .unwrap();
         let exhausted = apply_shared_free_exhaustion(decision, false);
         assert_eq!(exhausted.channel, UpstreamChannel::Free);
-        assert_eq!(exhausted.model, "deepseek-v4-flash-free");
+        assert_eq!(exhausted.model, "mimo-v2.5-free");
     }
 }

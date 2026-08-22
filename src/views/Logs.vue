@@ -532,6 +532,16 @@ function renderForwardDetail(row: ForwardLog) {
   ]);
 }
 
+function routeLegLabel(route?: string): string {
+  // Empty = a row written before the route column existed: keep the honest
+  // "not recorded" marker instead of hiding the row.
+  if (!route) return "—";
+  if (route === "auto") return t("自动");
+  if (route === "proxy") return t("代理");
+  if (route === "direct") return t("直连");
+  return route;
+}
+
 function renderDiagnostic(row: GatewayLog | ForwardLog) {
   const diagnostic = row.diagnostic;
   const items = [
@@ -541,6 +551,7 @@ function renderDiagnostic(row: GatewayLog | ForwardLog) {
       ? `${diagnostic.client_format} → ${diagnostic.upstream_format}`
       : diagnostic?.client_format],
     [t("尝试次数"), diagnostic?.attempt ?? ("attempt" in row ? row.attempt : null)],
+    [t("路由"), "route" in row ? routeLegLabel(row.route) : null],
     [t("耗时"), row.duration_ms !== null && row.duration_ms !== undefined
       ? `${row.duration_ms} ms`
       : diagnostic ? `${diagnostic.duration_ms} ms` : null],

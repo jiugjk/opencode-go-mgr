@@ -874,6 +874,14 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (21);")?;
         }
 
+        // v22: route leg label (`auto`/`proxy`/`direct`) for every forward
+        // attempt. Rows written before this change keep the empty default,
+        // honestly marking "not recorded" instead of guessing a leg.
+        if version < 22 {
+            ensure_column(&tx, "forward_logs", "route", "TEXT NOT NULL DEFAULT ''")?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (22);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -1465,13 +1473,13 @@ impl Database {
         self.conn.execute(
             "INSERT INTO forward_logs
              (timestamp, model, account_id, account_name, client_key_id, client_key_name,
-              status, http_status,
+              status, http_status, route,
               prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
               pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
               service_tier, cost_state, error_message, request_id, attempt,
               error_source, error_stage, duration_ms, diagnostic_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 log.timestamp.to_rfc3339(),
                 log.model,
@@ -1481,6 +1489,7 @@ impl Database {
                 log.client_key_name,
                 log.status,
                 log.http_status,
+                log.route,
                 log.prompt_tokens,
                 log.completion_tokens,
                 log.cached_tokens,
@@ -1642,7 +1651,7 @@ impl Database {
 
     pub fn list_forward_logs(&self, limit: i64) -> Result<Vec<ForwardLog>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, model, account_id, account_name, status, http_status,
+            "SELECT id, timestamp, model, account_id, account_name, status, http_status, route,
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
@@ -1693,7 +1702,7 @@ impl Database {
         )?;
 
         let items_sql = format!(
-            "SELECT id, timestamp, model, account_id, account_name, status, http_status,
+            "SELECT id, timestamp, model, account_id, account_name, status, http_status, route,
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
@@ -2940,8 +2949,12 @@ fn forward_log_order(sort_by: Option<&str>, sort_order: Option<&str>) -> String 
 }
 
 fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog> {
-    let raw_cost = row.get::<_, f64>(11)?;
-    let cost_state = row.get::<_, String>(16)?;
+    // SELECT order: id,timestamp,model,account_id,account_name,status,http_status,
+    // route,prompt,completion,cached,cache_creation,cost,pricing_revision,quota,
+    // local_adjustment,service_tier,cost_state,error_message,request_id,attempt,
+    // error_source,error_stage,duration_ms,diagnostic_json,client_key_id,client_key_name
+    let raw_cost = row.get::<_, f64>(12)?;
+    let cost_state = row.get::<_, String>(17)?;
     let cost = matches!(cost_state.as_str(), "priced" | "legacy_estimate").then_some(raw_cost);
     Ok(ForwardLog {
         id: row.get(0)?,
@@ -2949,28 +2962,29 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         model: row.get(2)?,
         account_id: row.get(3)?,
         account_name: row.get(4)?,
-        client_key_id: row.get(24)?,
-        client_key_name: row.get(25)?,
+        client_key_id: row.get(25)?,
+        client_key_name: row.get(26)?,
         status: row.get(5)?,
         http_status: row.get(6)?,
-        prompt_tokens: row.get(7)?,
-        completion_tokens: row.get(8)?,
-        cached_tokens: row.get(9)?,
-        cache_creation_tokens: row.get(10)?,
+        route: row.get(7)?,
+        prompt_tokens: row.get(8)?,
+        completion_tokens: row.get(9)?,
+        cached_tokens: row.get(10)?,
+        cache_creation_tokens: row.get(11)?,
         cost,
-        pricing_revision_id: row.get(12)?,
-        quota_multiplier: row.get(13)?,
-        local_adjustment_multiplier: row.get(14)?,
-        service_tier: row.get(15)?,
+        pricing_revision_id: row.get(13)?,
+        quota_multiplier: row.get(14)?,
+        local_adjustment_multiplier: row.get(15)?,
+        service_tier: row.get(16)?,
         cost_state,
-        error_message: row.get(17)?,
-        request_id: row.get(18)?,
-        attempt: row.get(19)?,
-        error_source: row.get(20)?,
-        error_stage: row.get(21)?,
-        duration_ms: row.get(22)?,
+        error_message: row.get(18)?,
+        request_id: row.get(19)?,
+        attempt: row.get(20)?,
+        error_source: row.get(21)?,
+        error_stage: row.get(22)?,
+        duration_ms: row.get(23)?,
         diagnostic: row
-            .get::<_, Option<String>>(23)?
+            .get::<_, Option<String>>(24)?
             .and_then(|json| serde_json::from_str(&json).ok()),
     })
 }
@@ -3122,6 +3136,7 @@ mod tests {
             client_key_name: None,
             status: status.into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
@@ -3140,6 +3155,62 @@ mod tests {
             duration_ms: None,
             diagnostic: None,
         }
+    }
+
+    #[test]
+    fn v22_adds_route_column_and_historical_rows_stay_unlabeled() {
+        let dir = temp_data_dir("v22-route-column");
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 22);
+
+        // A row written before the column existed keeps the empty default
+        // ("not recorded") — insert it without naming the route column.
+        db.conn
+            .execute(
+                "INSERT INTO forward_logs
+                 (timestamp, model, account_id, account_name, status, cost_state)
+                 VALUES ('2026-01-01T00:00:00Z', 'glm-5.3', 'a1', 'a1', 'success',
+                         'legacy_estimate')",
+                [],
+            )
+            .unwrap();
+
+        let mut modern = forward_log("a1", "success", 0.5);
+        modern.route = "proxy".to_string();
+        modern.model = "gpt-5.6-luna".to_string();
+        db.log_forward(&modern).unwrap();
+
+        let logs = db.list_forward_logs(10).unwrap();
+        assert_eq!(logs.len(), 2);
+        let historical = logs.iter().find(|log| log.model == "glm-5.3").unwrap();
+        assert_eq!(historical.route, "");
+        let labeled = logs.iter().find(|log| log.model == "gpt-5.6-luna").unwrap();
+        assert_eq!(labeled.route, "proxy");
+
+        // The paginated query surface exposes the same column.
+        let page = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                limit: 10,
+                offset: 0,
+                status: None,
+                account_id: None,
+                model: None,
+                key_id: None,
+                request_id: None,
+                start_time: None,
+                end_time: None,
+                sort_by: None,
+                sort_order: None,
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|log| {
+            (log.model == "glm-5.3" && log.route.is_empty())
+                || (log.model == "gpt-5.6-luna" && log.route == "proxy")
+        }));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3192,7 +3263,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -3419,7 +3490,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 21, "{label}");
+            assert_eq!(version, 22, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -3497,7 +3568,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -3646,7 +3717,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -3790,7 +3861,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3839,7 +3910,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -4266,7 +4337,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -4320,7 +4391,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -4395,7 +4466,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -5776,7 +5847,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         let index_exists: i64 = db
             .conn
@@ -5799,7 +5870,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5836,7 +5907,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
@@ -5866,7 +5937,7 @@ mod tests {
         ] {
             assert!(columns.contains(&name.to_string()), "missing {name}");
         }
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
 
         let account = account("sync-defaults");
         db.create_account(&account).unwrap();
@@ -5881,7 +5952,7 @@ mod tests {
         assert!(sync.last_expedited_at.is_none());
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5923,7 +5994,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired schema should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(notes_after, 1);
         db.list_accounts()
             .expect("account reads must survive a missing notes column on the draft");
@@ -6025,6 +6096,7 @@ mod tests {
             client_key_name: Some("Laptop".into()),
             status: "success".into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 1,
             completion_tokens: 1,
             cached_tokens: 0,

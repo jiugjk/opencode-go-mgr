@@ -10,7 +10,8 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
 use ocg_core::models::{
-    Account, AccountUpdate, ForwardLog, FreeModelRouting, ProxyMode, RoutingMode,
+    Account, AccountUpdate, ForwardLog, FreeModelRouting, ProxyListDirection, ProxyMode,
+    RoutingMode,
 };
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
@@ -18,7 +19,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -146,6 +147,9 @@ async fn start_mock_upstream(
         .route("/zen/v1/chat/completions", post(mock_chat))
         .route("/zen/v1/responses", post(mock_chat))
         .route("/zen/v1/messages", post(mock_chat))
+        .route("/zen/go/v1/chat/completions", post(mock_chat))
+        .route("/zen/go/v1/responses", post(mock_chat))
+        .route("/zen/go/v1/messages", post(mock_chat))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -594,6 +598,10 @@ async fn model_discovery_does_not_create_inference_logs() {
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("deepseek-v4-flash"));
+    assert!(
+        body.contains("big-pickle"),
+        "Zen-only free models must appear in GET /v1/models: {body}"
+    );
     assert_eq!(calls.lock().unwrap()[0].path, "/v1/models");
     let logs = state
         .db
@@ -1046,7 +1054,7 @@ async fn model_discovery_auth_failure_falls_back_without_same_account_replay() {
 }
 
 #[tokio::test]
-async fn model_discovery_401_breaker_skips_account_on_later_requests() {
+async fn model_discovery_401_is_returned_without_failover_or_breaker() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
@@ -1067,10 +1075,10 @@ async fn model_discovery_401_breaker_skips_account_on_later_requests() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    for _ in 0..2 {
-        let (status, body) = models(port).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
         calls
             .lock()
@@ -1078,7 +1086,7 @@ async fn model_discovery_401_breaker_skips_account_on_later_requests() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["key-1", "key-2", "key-2"]
+        ["key-1", "key-1"]
     );
     assert!(
         state
@@ -1088,8 +1096,8 @@ async fn model_discovery_401_breaker_skips_account_on_later_requests() {
             .unwrap()
             .unwrap()
             .auth_error
-            .as_deref()
-            .is_some_and(|error| error.contains("401"))
+            .is_none(),
+        "inference/discovery 401 must not permanently break an account"
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -2288,8 +2296,8 @@ async fn manual_order_drives_fallback_while_ineligible_accounts_are_skipped() {
         (
             "key-2".to_string(),
             VecDeque::from([MockReply {
-                status: 401,
-                body: r#"{"error":{"message":"expired key"}}"#,
+                status: 403,
+                body: r#"{"error":{"message":"forbidden key"}}"#,
             }]),
         ),
         (
@@ -2675,7 +2683,7 @@ async fn auth_failure_fails_over_without_same_account_replay() {
 }
 
 #[tokio::test]
-async fn auth_401_breaker_skips_account_on_later_inference_requests() {
+async fn inference_401_is_returned_without_failover_or_breaker() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
@@ -2698,7 +2706,11 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
 
     for _ in 0..2 {
         let (status, body) = chat(port).await;
-        assert_eq!(status, 200, "{body}");
+        assert_eq!(status, 401, "{body}");
+        assert!(
+            body.contains("expired key") || body.contains("401"),
+            "{body}"
+        );
     }
     assert_eq!(
         calls
@@ -2707,7 +2719,7 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["key-1", "key-2", "key-2"]
+        ["key-1", "key-1"]
     );
     assert!(
         state
@@ -2717,8 +2729,172 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
             .unwrap()
             .unwrap()
             .auth_error
-            .as_deref()
-            .is_some_and(|error| error.contains("401"))
+            .is_none(),
+        "inference 401 must not permanently break an account"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn unknown_model_401_is_returned_without_failover_or_breaker() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"error":{"message":"model does not exist"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "totally-made-up-xyz").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1"]
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .is_none(),
+        "an unknown-model 401 must not permanently break the account"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn registered_zen_promo_routes_to_zen_not_go() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    for model in ["big-pickle", "mimo-v2.5-free"] {
+        let (status, body) = protocol_call(port, "/v1/chat/completions", model).await;
+        assert_eq!(status, StatusCode::OK, "{model} {body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/zen/v1/chat/completions", "/zen/v1/chat/completions"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn go_named_free_stays_on_go() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    for model in ["ox-alpha-free", "brand-new-promo-free"] {
+        let (status, body) = protocol_call(port, "/v1/chat/completions", model).await;
+        assert_eq!(status, StatusCode::OK, "{model} {body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/zen/go/v1/chat/completions", "/zen/go/v1/chat/completions"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn known_free_model_401_is_returned_without_failover_or_breaker() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"error":{"message":"expired key"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1"]
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .is_none(),
+        "inference 401 must not permanently break an account"
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -2792,7 +2968,7 @@ async fn free_429_uses_channel_not_misleading_window_and_survives_account_remova
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
         calls
@@ -2815,12 +2991,12 @@ async fn free_429_uses_channel_not_misleading_window_and_survives_account_remova
     }
 
     set_account_enabled(&state, "acct-1", false);
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
     state.db.lock().delete_account("acct-1").unwrap();
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
@@ -3160,8 +3336,8 @@ async fn conversation_failover_rebinds_to_the_successful_account() {
         (
             "key-1".to_string(),
             VecDeque::from([MockReply {
-                status: 401,
-                body: r#"{"error":{"message":"expired key"}}"#,
+                status: 403,
+                body: r#"{"error":{"message":"forbidden key"}}"#,
             }]),
         ),
         (
@@ -3491,6 +3667,7 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
@@ -3602,5 +3779,268 @@ async fn gateway_stays_available_while_large_backfill_runs() {
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Applies a list-mode whitelist config pointing the exception (proxy) leg at
+/// `proxy_base` and returns the mutated config for further tweaks.
+fn apply_list_whitelist_config(
+    state: &Arc<CoreStateInner>,
+    upstream_base: String,
+    proxy_base: &str,
+    listed: &[&str],
+) {
+    let mut config = state.config();
+    config.upstream_base_url = upstream_base;
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = proxy_base.to_string();
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    config.proxy_list_models = listed.iter().map(|model| model.to_string()).collect();
+    state.set_config(config).unwrap();
+}
+
+async fn forward_log_rows(state: &Arc<CoreStateInner>) -> Vec<ForwardLog> {
+    state.db.lock().list_forward_logs(50).unwrap()
+}
+
+#[tokio::test]
+async fn list_mode_routes_listed_models_through_the_proxy_leg_and_labels_logs() {
+    // Direct-leg upstream answers anything with success.
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+    // Proxy-leg server: distinct listener so we can tell legs apart.
+    let (proxy_base, proxy_calls, stop_proxy) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+
+    let (state, dir) = build_state(upstream_base.clone(), &["key-1"]);
+    apply_list_whitelist_config(
+        &state,
+        upstream_base.clone(),
+        &proxy_base,
+        &["gpt-5.6-luna"],
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "gpt-5.6-luna").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "glm-5.2").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let proxy_call_count = proxy_calls.lock().unwrap().len();
+    let upstream_call_count = upstream_calls.lock().unwrap().len();
+    assert_eq!(
+        proxy_call_count, 1,
+        "listed model must traverse the proxy leg"
+    );
+    assert_eq!(
+        upstream_call_count, 1,
+        "unlisted model must connect directly"
+    );
+
+    let logs = forward_log_rows(&state).await;
+    let luna = logs
+        .iter()
+        .find(|log| log.model == "gpt-5.6-luna")
+        .expect("listed model row");
+    assert_eq!(luna.route, "proxy");
+    let glm = logs
+        .iter()
+        .find(|log| log.model == "glm-5.2")
+        .expect("unlisted model row");
+    assert_eq!(glm.route, "direct");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = stop_proxy.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
+    // Prefer mode: the request starts on the listed free twin (proxy leg,
+    // exhausted) and falls back to the unlisted Go model (direct leg).
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+    let (proxy_base, proxy_calls, stop_proxy) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 429,
+            body: LIMITED_BODY,
+        }]),
+    )]))
+    .await;
+
+    let (state, dir) = build_state(format!("{upstream_base}/zen/go"), &["key-1"]);
+    apply_list_whitelist_config(
+        &state,
+        format!("{upstream_base}/zen/go"),
+        &proxy_base,
+        &["mimo-v2.5-free"],
+    );
+    {
+        let mut config = state.config();
+        config.free_model_routing = FreeModelRouting::Prefer;
+        state.set_config(config).unwrap();
+    }
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        proxy_calls.lock().unwrap().len(),
+        1,
+        "the free twin attempt must use the listed proxy leg"
+    );
+    assert_eq!(
+        upstream_calls.lock().unwrap().len(),
+        1,
+        "the Go fallback must use the direct default leg"
+    );
+
+    let logs = forward_log_rows(&state).await;
+    let free_row = logs
+        .iter()
+        .find(|log| log.model == "mimo-v2.5-free")
+        .expect("free attempt row");
+    assert_eq!(
+        free_row.route, "proxy",
+        "free failure rows carry the leg too"
+    );
+    let go_row = logs
+        .iter()
+        .find(|log| log.model == "mimo-v2.5" && log.status == "success")
+        .expect("Go fallback success row");
+    assert_eq!(go_row.route, "direct");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = stop_proxy.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[derive(Clone)]
+struct SwitchingProxyState {
+    state: Arc<CoreStateInner>,
+    replies: Arc<Mutex<VecDeque<MockReply>>>,
+    switched: Arc<AtomicBool>,
+}
+
+/// Proxy-leg server that flips the process config to Direct while the first
+/// attempt is still in flight, then keeps replying from a fixed queue.
+async fn switching_proxy_chat(
+    axum::extract::State(server): axum::extract::State<SwitchingProxyState>,
+) -> impl IntoResponse {
+    if !server.switched.swap(true, Ordering::SeqCst) {
+        let mut config = server.state.config();
+        config.proxy_mode = ProxyMode::Direct;
+        server.state.set_config(config).unwrap();
+    }
+    let reply = server
+        .replies
+        .lock()
+        .unwrap()
+        .pop_front()
+        .expect("switching proxy replies must be pre-seeded");
+    (
+        StatusCode::from_u16(reply.status).unwrap(),
+        [("content-type", "application/json")],
+        reply.body,
+    )
+}
+
+#[tokio::test]
+async fn list_mode_midflight_config_switch_keeps_the_entry_snapshot() {
+    // Direct-leg upstream must observe zero calls: the retry after the
+    // in-flight switch still resolves from the entry snapshot's proxy leg.
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::new()).await;
+    let replies = Arc::new(Mutex::new(VecDeque::from([
+        MockReply {
+            // 403 still rotates accounts after upstream made inference 401 a
+            // hard return (Go uses 401 for ModelError).
+            status: 403,
+            body: r#"{"error":"first attempt rejected, rotate to next account"}"#,
+        },
+        MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        },
+    ])));
+    let switched = Arc::new(AtomicBool::new(false));
+
+    let (state, dir) = build_state(upstream_base.clone(), &["key-1", "key-2"]);
+    let proxy_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let proxy_base = format!("http://{}", proxy_listener.local_addr().unwrap());
+    let (proxy_shutdown_tx, proxy_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let proxy_app = Router::new()
+        .fallback(switching_proxy_chat)
+        .with_state(SwitchingProxyState {
+            state: state.clone(),
+            replies: replies.clone(),
+            switched: switched.clone(),
+        });
+    tokio::spawn(async move {
+        let server = axum::serve(proxy_listener, proxy_app).with_graceful_shutdown(async move {
+            let _ = proxy_shutdown_rx.await;
+        });
+        let _ = server.await;
+    });
+
+    apply_list_whitelist_config(
+        &state,
+        upstream_base.clone(),
+        &proxy_base,
+        &["gpt-5.6-luna"],
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "gpt-5.6-luna").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        switched.load(Ordering::SeqCst),
+        "config must have flipped mid-flight"
+    );
+    assert_eq!(
+        replies.lock().unwrap().len(),
+        0,
+        "both attempts must have hit the proxy leg of the entry snapshot"
+    );
+    assert_eq!(
+        upstream_calls.lock().unwrap().len(),
+        0,
+        "the in-flight request must not observe the Direct switch"
+    );
+    assert_eq!(state.config().proxy_mode, ProxyMode::Direct);
+
+    let logs = forward_log_rows(&state).await;
+    assert!(
+        logs.iter()
+            .filter(|log| log.model == "gpt-5.6-luna")
+            .all(|log| log.route == "proxy")
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = proxy_shutdown_tx.send(());
     let _ = fs::remove_dir_all(dir);
 }

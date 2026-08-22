@@ -187,7 +187,9 @@ Desktop 三个角色模型的持久化行为。
   OpenCode Go 价格快照计算 token 对应的额度消耗，面板窗口额度也来自同一快照。
   `PricingModel.quota_multiplier` 是唯一实际参与结算的官方倍率；抓取的快照按
   `月额度 / Usage` 推导，受保护的倍率更新端点可以为临时活动保存用户覆盖值，并
-  生成新的不可变 revision。
+  生成新的不可变 revision。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox
+  Alpha Free / `ox-alpha-free`）按无价格的 Go 促销跳过：它们不是 Zen free，也
+  不得让价格刷新失败。
 - 价格读写由受保护的 `GET /dashboard/api/pricing`、
   `PUT /dashboard/api/pricing/multipliers` 和
   `POST /dashboard/api/pricing/refresh` 提供。刷新发现官方倍率与当前值不同时，先返回
@@ -199,7 +201,8 @@ Desktop 三个角色模型的持久化行为。
   价格页。
 - `forwarder.rs` 向 `handler.rs` 返回显式动作：只有能证明请求尚未发出的
   DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403` 与 Go 通道 `429`
-  可以切换账号。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key；prefer
+  可以切换账号。推理 `401` 原样返回、不换号、不写 `auth_error`（Go 会把模型不
+  存在也打成 401）。面板 Ping / Key 验证的 401 仍记录 `auth_error`。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key；prefer
   随后回落 Go。`408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，
   无法确认的结果记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连
   超时；非流式请求使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。

@@ -102,9 +102,16 @@ double-bill.
 
 | Preferred upstream | Models |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
-| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna` |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+| Zen free (Chat) | `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`, `laguna-s-2.1-free` |
+| Zen free (Responses) | `muse-spark-1.2-contributor-free` |
+
+`ox-alpha-free` (Ox Alpha Free) is a Go Chat model; the name contains `free`
+but it stays on `/zen/go`. Only the registered Zen promo set above uses
+`https://opencode.ai/zen`. The Zen catalog is promotional and changes; those
+rows are the live-verified set from 2026-08-21.
 
 Gemini is a client format only (requests never go to Google). Claude Desktop
 aliases are rewritten to the mapping saved in **Applications**. Unknown models
